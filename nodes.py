@@ -480,8 +480,8 @@ class DecorAnimationPlayer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "video")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "animate"
     CATEGORY = "Ai说说/动画"
 
@@ -540,7 +540,7 @@ class DecorAnimationPlayer:
         }
         return {
             "ui": ui_payload,
-            "result": (frames_tensor, video_metadata["absolute_path"]),
+            "result": (frames_tensor,),
         }
 
 
@@ -564,8 +564,8 @@ class DecorFrameSequencePreview:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "video")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "preview"
     CATEGORY = "Ai说说/动画"
     OUTPUT_NODE = True
@@ -618,7 +618,7 @@ class DecorFrameSequencePreview:
         }
         return {
             "ui": ui_payload,
-            "result": (frames, video_metadata["absolute_path"]),
+            "result": (frames,),
         }
 
 

@@ -4,7 +4,7 @@
 
 ## 节点列表
 
-- `Decor Animation Player` —— 读取装饰元素 + mask + 底图 + 动画 JSON，合成每帧并输出 `IMAGE` 序列 + 视频元数据
+- `Decor Animation Player` —— 读取装饰元素 + mask + 底图 + 动画 JSON，合成每帧并输出 `IMAGE` 序列，同时直接生成并预览视频
 - `Decor Frame Sequence Preview` —— 把上游 `IMAGE` 帧序列直接编码成可在 `ComfyUI` 前端播放的视频
 
 ## 功能
@@ -42,8 +42,8 @@
 ### 输出
 
 - `image`: 所有帧合成图，`IMAGE` tensor，格式 `[N, H, W, 3]`，可直接接到 `Decor Frame Sequence Preview`、`Preview Image`、`Save Image`、`Image Batch` 等节点
-- `video`: 视频文件绝对路径字符串（正斜杠），下游节点可直接用 `av.open(path)` 等方式打开这个 mp4
 - 前端预览：节点会直接返回 `ui.videos`，可在 `ComfyUI` 节点卡片中原生播放
+- 视频生成：运行节点时会自动写出 `MP4`
 
 ## 节点 2：Decor Frame Sequence Preview
 
@@ -59,8 +59,8 @@
 ### 输出
 
 - `image`: 透传 `frames`
-- `video`: 视频文件绝对路径字符串（正斜杠），下游节点可直接用 `av.open(path)` 等方式打开这个 mp4
 - 前端预览：节点会直接返回 `ui.videos`，可在 `ComfyUI` 节点卡片中原生播放
+- 视频生成：运行节点时会自动写出 `MP4`
 
 ### 推荐链路
 
@@ -152,4 +152,3 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 ## 示例
 
 示例 JSON 见 `examples/sample_animation.json`
-
