@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from fractions import Fraction
@@ -15,6 +16,11 @@ try:
     import folder_paths
 except ImportError:  # pragma: no cover
     folder_paths = None
+
+try:
+    import imageio_ffmpeg as _imageio_ffmpeg
+except ImportError:  # pragma: no cover
+    _imageio_ffmpeg = None
 
 
 def _first_tensor_item(value: torch.Tensor) -> torch.Tensor:
@@ -294,86 +300,30 @@ def _build_video_metadata(
     }
 
 
-def _pick_video_encoder() -> Tuple[str, Dict[str, str]]:
-    """选择视频编码器。
-
-    优先尝试 libx264；若在本机环境下 libx264 初始化失败，回退到 mpeg4。
-    返回 (codec_name, options) 元组。
-    """
-    x264_options = {
-        "crf": "20",
-        "preset": "medium",
-    }
-    try:
-        test_container = av.open(os.devnull, mode="w", options={"f": "null"})
-    except Exception:
-        test_container = None
-    if test_container is not None:
-        try:
-            test_stream = test_container.add_stream("libx264", rate=Fraction(1, 1))
-            test_stream.options = x264_options
-            test_stream.close()
-            test_container.close()
-            return "libx264", x264_options
-        except Exception:
-            try:
-                test_container.close()
-            except Exception:
-                pass
-    return "mpeg4", {}
-
-
 def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: str, crf: int) -> Tuple[str, str, str]:
     if not frames:
         raise ValueError("没有可编码的视频帧。")
 
     full_path, file_name, subfolder = _build_output_path(filename_prefix, frames[0].width, frames[0].height)
-    codec_name, codec_options = _pick_video_encoder()
-    if codec_name != "libx264":
-        codec_options = {}
 
     last_error: Exception | None = None
-    for attempt_codec in (codec_name, "mpeg4"):
-        if attempt_codec != codec_name and last_error is None:
-            continue
-        container = av.open(full_path, mode="w", options={"movflags": "+faststart"})
+    encoded_with_h264 = False
+
+    ffmpeg_exe = _get_ffmpeg_exe()
+    if ffmpeg_exe is not None:
         try:
-            stream = container.add_stream(attempt_codec, rate=Fraction(max(fps, 1), 1))
-            stream.width = frames[0].width
-            stream.height = frames[0].height
-            stream.pix_fmt = "yuv420p"
-            if attempt_codec == "libx264":
-                stream.options = {
-                    "crf": str(max(0, min(51, crf))),
-                    "preset": "medium",
-                }
-
-            for frame in frames:
-                rgb_frame = np.asarray(frame.convert("RGB"), dtype=np.uint8)
-                video_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
-                for packet in stream.encode(video_frame):
-                    container.mux(packet)
-
-            for packet in stream.encode():
-                container.mux(packet)
-            break
+            _encode_via_ffmpeg(frames, fps, crf, full_path, ffmpeg_exe)
+            encoded_with_h264 = True
         except Exception as exc:  # pragma: no cover
             last_error = exc
-            try:
-                container.close()
-            except Exception:
-                pass
-            if attempt_codec == "libx264":
-                continue
+
+    if not encoded_with_h264:
+        try:
+            _encode_via_av(frames, fps, crf, full_path)
+        except Exception as exc:
+            if last_error is not None:
+                raise last_error from exc
             raise
-        finally:
-            try:
-                container.close()
-            except Exception:
-                pass
-    else:
-        if last_error is not None:
-            raise last_error
 
     normalized_full_path = _normalize_path_for_downstream(full_path)
     if not os.path.exists(normalized_full_path.replace("/", os.sep)):
@@ -382,6 +332,120 @@ def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: st
     if file_size <= 0:
         raise RuntimeError(f"视频写出失败，文件大小为 0: {normalized_full_path}")
     return normalized_full_path, file_name, subfolder
+
+
+def _get_ffmpeg_exe() -> str | None:
+    """返回可用的 ffmpeg 可执行文件路径。
+
+    优先尝试 imageio-ffmpeg 自带的 ffmpeg（pip 安装时自动下载）。
+    其次尝试系统 PATH 中的 ffmpeg。
+    都不可用则返回 None，节点会回退到 av 编码。
+    """
+    if _imageio_ffmpeg is not None:
+        try:
+            return _imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+    for name in ("ffmpeg", "ffmpeg.exe"):
+        from shutil import which
+        found = which(name)
+        if found:
+            return found
+    return None
+
+
+def _encode_via_ffmpeg(
+    frames: Sequence[Image.Image],
+    fps: int,
+    crf: int,
+    full_path: str,
+    ffmpeg_exe: str,
+) -> None:
+    """通过 ffmpeg 子进程把帧编码为 h264 mp4。
+
+    优点：输出是浏览器原生支持的 h264/yuv420p。
+    实现：先写到一个临时 rawvideo 文件，再让 ffmpeg 从文件读，
+    避免高分辨率时 stdin pipe BrokenPipe。
+    """
+    # h264/yuv420p 要求宽高都是偶数
+    raw_width = frames[0].width
+    raw_height = frames[0].height
+    enc_width = raw_width + (raw_width % 2)
+    enc_height = raw_height + (raw_height % 2)
+
+    import tempfile
+    raw_path = os.path.join(tempfile.gettempdir(), f"decor_anim_{uuid.uuid4().hex}.rgb")
+    try:
+        with open(raw_path, "wb") as handle:
+            for frame in frames:
+                arr = np.asarray(frame.convert("RGB"), dtype=np.uint8)
+                if (arr.shape[1], arr.shape[0]) != (enc_width, enc_height):
+                    # 转 PIL 再 resize 到偶数尺寸
+                    pil = Image.fromarray(arr, mode="RGB")
+                    if pil.size != (enc_width, enc_height):
+                        pil = pil.resize((enc_width, enc_height), Image.Resampling.LANCZOS)
+                    arr = np.asarray(pil, dtype=np.uint8)
+                handle.write(arr.tobytes())
+
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-s", f"{enc_width}x{enc_height}",
+            "-pix_fmt", "rgb24",
+            "-r", str(max(int(fps), 1)),
+            "-i", raw_path,
+            "-an",
+            "-vcodec", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "medium",
+            "-crf", str(max(0, min(51, int(crf)))),
+            "-movflags", "+faststart",
+            full_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "ffmpeg 编码失败: "
+                + result.stderr.decode("utf-8", errors="ignore")[-400:]
+            )
+    finally:
+        try:
+            os.remove(raw_path)
+        except OSError:
+            pass
+
+
+def _encode_via_av(frames: Sequence[Image.Image], fps: int, crf: int, full_path: str) -> None:
+    """通过 PyAV 直接编码。
+
+    在很多环境里 libx264 二进制不能初始化，所以这里默认用 mpeg4 编码。
+    这是回退方案，输出文件虽然合法但浏览器不一定能播。
+    """
+    container = av.open(full_path, mode="w", options={"movflags": "+faststart"})
+    try:
+        stream = container.add_stream("mpeg4", rate=Fraction(max(int(fps), 1), 1))
+        stream.width = frames[0].width
+        stream.height = frames[0].height
+        stream.pix_fmt = "yuv420p"
+
+        for frame in frames:
+            rgb_frame = np.asarray(frame.convert("RGB"), dtype=np.uint8)
+            video_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
+            for packet in stream.encode(video_frame):
+                container.mux(packet)
+
+        for packet in stream.encode():
+            container.mux(packet)
+    finally:
+        container.close()
 
 
 class DecorAnimationPlayer:

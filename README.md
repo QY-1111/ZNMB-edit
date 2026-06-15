@@ -17,6 +17,10 @@
 2. 重启 `ComfyUI`
 3. 在节点分类 `Ai说说/动画` 中找到 `Decor Animation Player`
 
+> 节点会优先调用 `imageio-ffmpeg` 自带的 `ffmpeg` 子进程写出 **h264 / yuv420p** 的 MP4，
+> 这种格式浏览器原生支持，节点卡片可以直接预览。
+> 如果 `imageio-ffmpeg` 不可用，会回退到 `PyAV` 的 mpeg4 编码。
+
 ## 节点输入
 
 - `image`: 要做动画的装饰元素图片
