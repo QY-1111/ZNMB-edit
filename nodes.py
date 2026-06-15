@@ -3,8 +3,10 @@ import math
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from fractions import Fraction
+from typing import Any, Dict, List, Sequence, Tuple
 
+import av
 import numpy as np
 import torch
 from PIL import Image
@@ -36,16 +38,6 @@ def _tensor_mask_to_pil(mask: torch.Tensor, size: Sequence[int]) -> Image.Image:
     if pil_mask.size != tuple(size):
         pil_mask = pil_mask.resize(tuple(size), Image.Resampling.BILINEAR)
     return pil_mask
-
-
-def _pil_to_image_tensor(image: Image.Image) -> torch.Tensor:
-    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    return torch.from_numpy(array)
-
-
-def _pil_to_mask_tensor(mask: Image.Image) -> torch.Tensor:
-    array = np.asarray(mask.convert("L"), dtype=np.float32) / 255.0
-    return torch.from_numpy(array)
 
 
 @dataclass
@@ -90,10 +82,7 @@ def _coerce_keyframes(raw_value: Any, last_frame: int, default: float) -> List[K
         raw_frame = item.get("frame")
         if raw_frame is None:
             raw_time = item.get("time")
-            if raw_time is None:
-                raw_frame = index
-            else:
-                raw_frame = raw_time
+            raw_frame = index if raw_time is None else raw_time
 
         value = item.get("value", item.get("v", default))
         easing = str(item.get("easing", item.get("ease", "linear")))
@@ -191,64 +180,29 @@ def _get_frame_count(config: Dict[str, Any], fps: int) -> int:
     return 24
 
 
-def _get_temp_preview_directory() -> str:
-    if folder_paths is not None and hasattr(folder_paths, "get_temp_directory"):
-        base_dir = folder_paths.get_temp_directory()
-    else:  # pragma: no cover
-        base_dir = os.path.join(os.getcwd(), "temp")
-    preview_dir = os.path.join(base_dir, "decor_animation_previews")
-    os.makedirs(preview_dir, exist_ok=True)
-    return preview_dir
-
-
-def _save_preview_gif(frames: Sequence[Image.Image], fps: int) -> str:
-    if not frames:
-        raise ValueError("没有可保存的预览帧。")
-
-    preview_dir = _get_temp_preview_directory()
-    file_name = f"decor_animation_{uuid.uuid4().hex[:10]}.gif"
-    full_path = os.path.join(preview_dir, file_name)
-    duration_ms = max(20, int(round(1000 / max(fps, 1))))
-
-    converted_frames = [frame.convert("RGBA") for frame in frames]
-    converted_frames[0].save(
-        full_path,
-        save_all=True,
-        append_images=converted_frames[1:],
-        duration=duration_ms,
-        loop=0,
-        disposal=2,
-    )
-    return full_path
-
-
-def _pil_size_from_bbox_or_full(alpha: Image.Image) -> Sequence[int]:
+def _bbox_or_full(alpha: Image.Image) -> Sequence[int]:
     bbox = alpha.getbbox()
     if bbox is None:
         return (0, 0, alpha.width, alpha.height)
     return bbox
 
 
-def _build_base_layers(image: Image.Image, mask: Image.Image, background_mode: str) -> Dict[str, Image.Image]:
+def _extract_element_layer(image: Image.Image, mask: Image.Image) -> Dict[str, Any]:
     rgba = image.convert("RGBA")
     alpha = mask.convert("L")
     rgba.putalpha(alpha)
-
-    bbox = _pil_size_from_bbox_or_full(alpha)
-    element = rgba.crop(bbox)
-
-    if background_mode == "keep_unmasked":
-        inv_alpha = Image.eval(alpha, lambda px: 255 - px)
-        background = image.convert("RGBA")
-        background.putalpha(inv_alpha)
-    else:
-        background = Image.new("RGBA", image.size, (0, 0, 0, 0))
-
+    bbox = _bbox_or_full(alpha)
     return {
-        "element": element,
-        "background": background,
+        "element": rgba.crop(bbox),
         "bbox": bbox,
     }
+
+
+def _fit_base_image(base_image: Image.Image, target_size: Sequence[int]) -> Image.Image:
+    converted = base_image.convert("RGBA")
+    if converted.size == tuple(target_size):
+        return converted
+    return converted.resize(tuple(target_size), Image.Resampling.LANCZOS)
 
 
 def _paste_transformed_element(
@@ -285,6 +239,63 @@ def _paste_transformed_element(
     return canvas
 
 
+def _resolve_output_dir() -> str:
+    if folder_paths is not None and hasattr(folder_paths, "get_output_directory"):
+        return folder_paths.get_output_directory()
+    output_dir = os.path.join(os.getcwd(), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _build_output_path(prefix: str, width: int, height: int) -> Tuple[str, str, str]:
+    if folder_paths is not None and hasattr(folder_paths, "get_save_image_path"):
+        full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            prefix,
+            _resolve_output_dir(),
+            width,
+            height,
+        )
+    else:  # pragma: no cover
+        full_output_folder = _resolve_output_dir()
+        filename = prefix.replace("/", "_").replace("\\", "_")
+        counter = 1
+        subfolder = ""
+
+    os.makedirs(full_output_folder, exist_ok=True)
+    file_name = f"{filename}_{counter:05}_.mp4"
+    return os.path.join(full_output_folder, file_name), file_name, subfolder
+
+
+def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: str, crf: int) -> Tuple[str, str, str]:
+    if not frames:
+        raise ValueError("没有可编码的视频帧。")
+
+    full_path, file_name, subfolder = _build_output_path(filename_prefix, frames[0].width, frames[0].height)
+    container = av.open(full_path, mode="w")
+    stream = container.add_stream("libx264", rate=Fraction(max(fps, 1), 1))
+    stream.width = frames[0].width
+    stream.height = frames[0].height
+    stream.pix_fmt = "yuv420p"
+    stream.options = {
+        "crf": str(max(0, min(51, crf))),
+        "preset": "medium",
+    }
+
+    try:
+        for frame in frames:
+            rgb_frame = np.asarray(frame.convert("RGB"), dtype=np.uint8)
+            video_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
+            for packet in stream.encode(video_frame):
+                container.mux(packet)
+
+        for packet in stream.encode():
+            container.mux(packet)
+    finally:
+        container.close()
+
+    return full_path, file_name, subfolder
+
+
 class DecorAnimationPlayer:
     @classmethod
     def INPUT_TYPES(cls):
@@ -292,20 +303,22 @@ class DecorAnimationPlayer:
             "required": {
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
+                "base_image": ("IMAGE",),
                 "animation_json": ("STRING", {"multiline": True, "default": "{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -40, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 1.15, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": -6}, {\"frame\": 23, \"value\": 6, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}"}),
-                "background_mode": (["transparent_canvas", "keep_unmasked"], {"default": "transparent_canvas"}),
             },
             "optional": {
                 "fps_override": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1}),
+                "filename_prefix": ("STRING", {"default": "decor_animation/decor_animation"}),
+                "mp4_crf": ("INT", {"default": 20, "min": 0, "max": 51, "step": 1}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("frames", "alpha_masks", "preview_file")
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video",)
     FUNCTION = "animate"
     CATEGORY = "Ai说说/动画"
 
-    def animate(self, image, mask, animation_json, background_mode, fps_override=0):
+    def animate(self, image, mask, base_image, animation_json, fps_override=0, filename_prefix="decor_animation/decor_animation", mp4_crf=20):
         config = _normalize_animation_config(animation_json)
         fps = int(fps_override) if int(fps_override) > 0 else int(config.get("fps", 12))
         fps = max(1, fps)
@@ -320,19 +333,19 @@ class DecorAnimationPlayer:
         rotation_track = _resolve_track(config, ("rotation", "angle"), 0.0, last_frame)
         opacity_track = _resolve_track(config, ("opacity", "alpha"), 1.0, last_frame)
 
-        image_pil = _tensor_image_to_pil(image)
-        mask_pil = _tensor_mask_to_pil(mask, image_pil.size)
-        layers = _build_base_layers(image_pil, mask_pil, background_mode)
+        element_image = _tensor_image_to_pil(image)
+        mask_pil = _tensor_mask_to_pil(mask, element_image.size)
+        base_pil = _fit_base_image(_tensor_image_to_pil(base_image), element_image.size)
+        layers = _extract_element_layer(element_image, mask_pil)
 
         frame_images: List[Image.Image] = []
-        frame_masks: List[Image.Image] = []
         for frame_index in range(frame_count):
             uniform_scale = _sample_keyframes(scale_track, frame_index)
             scale_x = uniform_scale * _sample_keyframes(scale_x_track, frame_index)
             scale_y = uniform_scale * _sample_keyframes(scale_y_track, frame_index)
 
             frame_rgba = _paste_transformed_element(
-                background=layers["background"],
+                background=base_pil,
                 element=layers["element"],
                 bbox=layers["bbox"],
                 translate_x=_sample_keyframes(translate_x_track, frame_index),
@@ -343,27 +356,22 @@ class DecorAnimationPlayer:
                 opacity=_sample_keyframes(opacity_track, frame_index),
             )
             frame_images.append(frame_rgba)
-            frame_masks.append(frame_rgba.getchannel("A"))
 
-        preview_path = _save_preview_gif(frame_images, fps)
-        relative_preview_dir = "decor_animation_previews"
-
-        image_tensor = torch.stack([_pil_to_image_tensor(frame) for frame in frame_images], dim=0)
-        mask_tensor = torch.stack([_pil_to_mask_tensor(frame) for frame in frame_masks], dim=0)
-
+        video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
         ui_payload = {
-            "images": [
+            "videos": [
                 {
-                    "filename": os.path.basename(preview_path),
-                    "subfolder": relative_preview_dir,
-                    "type": "temp",
+                    "filename": file_name,
+                    "subfolder": subfolder,
+                    "type": "output",
+                    "format": "video/mp4",
                 }
             ],
             "text": [f"{frame_count} frames @ {fps} fps"],
         }
         return {
             "ui": ui_payload,
-            "result": (image_tensor, mask_tensor, preview_path),
+            "result": (video_path,),
         }
 
 
