@@ -1,0 +1,20 @@
+{
+  "fps": 12,
+  "frame_count": 24,
+  "translate_y": [
+    { "frame": 0, "value": 0, "easing": "ease_in_out" },
+    { "frame": 12, "value": -36, "easing": "ease_out" },
+    { "frame": 23, "value": 0, "easing": "ease_in" }
+  ],
+  "scale": {
+    "from": 1.0,
+    "to": 1.12,
+    "easing": "ease_in_out"
+  },
+  "rotation": [
+    { "frame": 0, "value": -8 },
+    { "frame": 12, "value": 8, "easing": "ease_in_out" },
+    { "frame": 23, "value": -8, "easing": "ease_in_out" }
+  ],
+  "opacity": 1.0
+}
