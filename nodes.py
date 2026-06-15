@@ -47,10 +47,18 @@ def _tensor_mask_to_pil(mask: torch.Tensor, size: Sequence[int]) -> Image.Image:
 
 
 def _pil_to_comfy_image(pil: Image.Image) -> torch.Tensor:
-    """把 PIL.Image 转成 ComfyUI 标准的 IMAGE tensor: [1, H, W, 3] float32 RGB."""
+    """把单张 PIL.Image 转成 ComfyUI 标准的 IMAGE tensor: [1, H, W, 3] float32 RGB."""
     rgb = pil.convert("RGB")
     array = np.asarray(rgb, dtype=np.float32) / 255.0
     return torch.from_numpy(array).unsqueeze(0)
+
+
+def _pil_batch_to_comfy_image(pils: Sequence[Image.Image]) -> torch.Tensor:
+    """把一批 PIL.Image 转成 ComfyUI 标准的 IMAGE tensor: [N, H, W, 3] float32 RGB."""
+    arrays = [np.asarray(p.convert("RGB"), dtype=np.float32) / 255.0 for p in pils]
+    if not arrays:
+        return torch.zeros((0, 0, 0, 3), dtype=torch.float32)
+    return torch.from_numpy(np.stack(arrays, axis=0))
 
 
 @dataclass
@@ -525,14 +533,14 @@ class DecorAnimationPlayer:
             width=frame_images[0].width,
             height=frame_images[0].height,
         )
-        first_frame_tensor = _pil_to_comfy_image(frame_images[0])
+        frames_tensor = _pil_batch_to_comfy_image(frame_images)
         ui_payload = {
             "videos": [video_metadata],
             "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"],
         }
         return {
             "ui": ui_payload,
-            "result": (first_frame_tensor, json.dumps(video_metadata, ensure_ascii=False)),
+            "result": (frames_tensor, json.dumps(video_metadata, ensure_ascii=False)),
         }
 
 
