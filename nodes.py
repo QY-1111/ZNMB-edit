@@ -46,6 +46,13 @@ def _tensor_mask_to_pil(mask: torch.Tensor, size: Sequence[int]) -> Image.Image:
     return pil_mask
 
 
+def _pil_to_comfy_image(pil: Image.Image) -> torch.Tensor:
+    """把 PIL.Image 转成 ComfyUI 标准的 IMAGE tensor: [1, H, W, 3] float32 RGB."""
+    rgb = pil.convert("RGB")
+    array = np.asarray(rgb, dtype=np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
 @dataclass
 class Keyframe:
     frame: int
@@ -465,8 +472,8 @@ class DecorAnimationPlayer:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("video",)
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "video")
     FUNCTION = "animate"
     CATEGORY = "Ai说说/动画"
 
@@ -518,13 +525,14 @@ class DecorAnimationPlayer:
             width=frame_images[0].width,
             height=frame_images[0].height,
         )
+        first_frame_tensor = _pil_to_comfy_image(frame_images[0])
         ui_payload = {
             "videos": [video_metadata],
             "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"],
         }
         return {
             "ui": ui_payload,
-            "result": (json.dumps(video_metadata, ensure_ascii=False),),
+            "result": (first_frame_tensor, json.dumps(video_metadata, ensure_ascii=False)),
         }
 
 

@@ -33,6 +33,7 @@
 
 ## 节点输出
 
+- `image`: 第一帧合成图，`IMAGE` tensor，格式 `[1, H, W, 3]`，可直接接到 `Preview Image`、`Save Image` 等节点
 - `video`: 生成后的视频元数据 JSON 字符串，包含文件名、子目录、格式、尺寸、fps、帧数和绝对路径
 - 前端预览：节点会直接返回 `ui.videos`，可在 `ComfyUI` 节点卡片中原生播放
 
