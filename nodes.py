@@ -401,7 +401,8 @@ class DecorAnimationPlayer:
             height=frame_images[0].height,
         )
         ui_payload = {
-            "text": [f"saved video metadata: {file_name} ({frame_count} frames @ {fps} fps)"],
+            "videos": [video_metadata],
+            "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"],
         }
         return {
             "ui": ui_payload,
