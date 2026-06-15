@@ -6,3 +6,5 @@ __pycache__/
 temp/
 .dbg/
 debug-*.md
+output/
+测试样本/

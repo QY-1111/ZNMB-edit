@@ -294,32 +294,86 @@ def _build_video_metadata(
     }
 
 
+def _pick_video_encoder() -> Tuple[str, Dict[str, str]]:
+    """选择视频编码器。
+
+    优先尝试 libx264；若在本机环境下 libx264 初始化失败，回退到 mpeg4。
+    返回 (codec_name, options) 元组。
+    """
+    x264_options = {
+        "crf": "20",
+        "preset": "medium",
+    }
+    try:
+        test_container = av.open(os.devnull, mode="w", options={"f": "null"})
+    except Exception:
+        test_container = None
+    if test_container is not None:
+        try:
+            test_stream = test_container.add_stream("libx264", rate=Fraction(1, 1))
+            test_stream.options = x264_options
+            test_stream.close()
+            test_container.close()
+            return "libx264", x264_options
+        except Exception:
+            try:
+                test_container.close()
+            except Exception:
+                pass
+    return "mpeg4", {}
+
+
 def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: str, crf: int) -> Tuple[str, str, str]:
     if not frames:
         raise ValueError("没有可编码的视频帧。")
 
     full_path, file_name, subfolder = _build_output_path(filename_prefix, frames[0].width, frames[0].height)
-    container = av.open(full_path, mode="w", options={"movflags": "+faststart"})
-    stream = container.add_stream("libx264", rate=Fraction(max(fps, 1), 1))
-    stream.width = frames[0].width
-    stream.height = frames[0].height
-    stream.pix_fmt = "yuv420p"
-    stream.options = {
-        "crf": str(max(0, min(51, crf))),
-        "preset": "medium",
-    }
+    codec_name, codec_options = _pick_video_encoder()
+    if codec_name != "libx264":
+        codec_options = {}
 
-    try:
-        for frame in frames:
-            rgb_frame = np.asarray(frame.convert("RGB"), dtype=np.uint8)
-            video_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
-            for packet in stream.encode(video_frame):
+    last_error: Exception | None = None
+    for attempt_codec in (codec_name, "mpeg4"):
+        if attempt_codec != codec_name and last_error is None:
+            continue
+        container = av.open(full_path, mode="w", options={"movflags": "+faststart"})
+        try:
+            stream = container.add_stream(attempt_codec, rate=Fraction(max(fps, 1), 1))
+            stream.width = frames[0].width
+            stream.height = frames[0].height
+            stream.pix_fmt = "yuv420p"
+            if attempt_codec == "libx264":
+                stream.options = {
+                    "crf": str(max(0, min(51, crf))),
+                    "preset": "medium",
+                }
+
+            for frame in frames:
+                rgb_frame = np.asarray(frame.convert("RGB"), dtype=np.uint8)
+                video_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
+                for packet in stream.encode(video_frame):
+                    container.mux(packet)
+
+            for packet in stream.encode():
                 container.mux(packet)
-
-        for packet in stream.encode():
-            container.mux(packet)
-    finally:
-        container.close()
+            break
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            try:
+                container.close()
+            except Exception:
+                pass
+            if attempt_codec == "libx264":
+                continue
+            raise
+        finally:
+            try:
+                container.close()
+            except Exception:
+                pass
+    else:
+        if last_error is not None:
+            raise last_error
 
     normalized_full_path = _normalize_path_for_downstream(full_path)
     if not os.path.exists(normalized_full_path.replace("/", os.sep)):
