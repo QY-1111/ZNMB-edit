@@ -22,6 +22,53 @@ try:
 except ImportError:  # pragma: no cover
     _imageio_ffmpeg = None
 
+try:
+    from comfy_api.latest import ComfyExtension, io, ui
+except ImportError:  # pragma: no cover
+    ComfyExtension = None
+    io = None
+    ui = None
+
+
+HAS_OFFICIAL_PREVIEW_API = ComfyExtension is not None and io is not None and ui is not None
+
+
+# #region debug-point A:report-helper
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: Dict[str, Any] | None = None, run_id: str = "pre-fix") -> None:
+    import json as _json
+    import urllib.request as _request
+
+    env_path = os.path.join(os.path.dirname(__file__), ".dbg", "video-card-preview.env")
+    server_url = "http://127.0.0.1:7777/event"
+    session_id = "video-card-preview"
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+        server_url = next((line.split("=", 1)[1] for line in content.splitlines() if line.startswith("DEBUG_SERVER_URL=")), server_url)
+        session_id = next((line.split("=", 1)[1] for line in content.splitlines() if line.startswith("DEBUG_SESSION_ID=")), session_id)
+    except Exception:
+        return
+    try:
+        payload = {
+            "sessionId": session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+        }
+        _request.urlopen(
+            _request.Request(
+                server_url,
+                data=_json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=1.0,
+        ).read()
+    except Exception:
+        pass
+# #endregion
+
 
 def _first_tensor_item(value: torch.Tensor) -> torch.Tensor:
     if value.dim() == 4:
@@ -291,7 +338,7 @@ def _normalize_path_for_downstream(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
-def _build_video_metadata(
+def _build_legacy_video_metadata(
     full_path: str,
     file_name: str,
     subfolder: str,
@@ -313,6 +360,34 @@ def _build_video_metadata(
         "absolute_path": normalized_path,
         "file_url": f"file:///{normalized_path}",
     }
+
+
+def _build_video_metadata(
+    full_path: str,
+    file_name: str,
+    subfolder: str,
+    fps: int,
+    frame_count: int,
+    width: int,
+    height: int,
+) -> Dict[str, Any]:
+    if HAS_OFFICIAL_PREVIEW_API:
+        return ui.SavedResult(file_name, subfolder, io.FolderType.output)
+    return _build_legacy_video_metadata(
+        full_path=full_path,
+        file_name=file_name,
+        subfolder=subfolder,
+        fps=fps,
+        frame_count=frame_count,
+        width=width,
+        height=height,
+    )
+
+
+def _build_preview_ui(file_name: str, subfolder: str):
+    if HAS_OFFICIAL_PREVIEW_API:
+        return ui.PreviewVideo([ui.SavedResult(file_name, subfolder, io.FolderType.output)])
+    return None
 
 
 def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: str, crf: int) -> Tuple[str, str, str]:
@@ -463,6 +538,73 @@ def _encode_via_av(frames: Sequence[Image.Image], fps: int, crf: int, full_path:
         container.close()
 
 
+def _render_animation_frames(
+    image: torch.Tensor,
+    mask: torch.Tensor,
+    base_image: torch.Tensor,
+    animation_json: str,
+    fps_override: int = 0,
+) -> Tuple[List[Image.Image], int, int]:
+    config = _normalize_animation_config(animation_json)
+    fps = int(fps_override) if int(fps_override) > 0 else int(config.get("fps", 12))
+    fps = max(1, fps)
+    frame_count = _get_frame_count(config, fps)
+    last_frame = max(frame_count - 1, 0)
+
+    translate_x_track = _resolve_track(config, ("translate_x", "x", "position_x", "tx"), 0.0, last_frame)
+    translate_y_track = _resolve_track(config, ("translate_y", "y", "position_y", "ty"), 0.0, last_frame)
+    scale_track = _resolve_track(config, ("scale",), 1.0, last_frame)
+    scale_x_track = _resolve_track(config, ("scale_x", "sx"), 1.0, last_frame)
+    scale_y_track = _resolve_track(config, ("scale_y", "sy"), 1.0, last_frame)
+    rotation_track = _resolve_track(config, ("rotation", "angle"), 0.0, last_frame)
+    opacity_track = _resolve_track(config, ("opacity", "alpha"), 1.0, last_frame)
+
+    element_image = _tensor_image_to_pil(image)
+    mask_pil = _tensor_mask_to_pil(mask, element_image.size)
+    base_pil = _fit_base_image(_tensor_image_to_pil(base_image), element_image.size)
+    layers = _extract_element_layer(element_image, mask_pil)
+
+    frame_images: List[Image.Image] = []
+    for frame_index in range(frame_count):
+        uniform_scale = _sample_keyframes(scale_track, frame_index)
+        scale_x = uniform_scale * _sample_keyframes(scale_x_track, frame_index)
+        scale_y = uniform_scale * _sample_keyframes(scale_y_track, frame_index)
+
+        frame_rgba = _paste_transformed_element(
+            background=base_pil,
+            element=layers["element"],
+            bbox=layers["bbox"],
+            translate_x=_sample_keyframes(translate_x_track, frame_index),
+            translate_y=_sample_keyframes(translate_y_track, frame_index),
+            scale_x=scale_x,
+            scale_y=scale_y,
+            rotation=_sample_keyframes(rotation_track, frame_index),
+            opacity=_sample_keyframes(opacity_track, frame_index),
+        )
+        frame_images.append(frame_rgba)
+
+    return frame_images, fps, frame_count
+
+
+def _tensor_frames_to_pil(frames: torch.Tensor) -> Tuple[List[Image.Image], int, int, int]:
+    if not isinstance(frames, torch.Tensor):
+        raise TypeError(f"frames 必须是 IMAGE tensor, 实际收到 {type(frames).__name__}")
+    if frames.ndim != 4 or frames.shape[-1] not in (3, 4):
+        raise ValueError(f"frames 形状必须是 [N, H, W, 3/4], 实际是 {tuple(frames.shape)}")
+    if frames.shape[0] <= 0:
+        raise ValueError("frames 是空批次")
+
+    frame_count = int(frames.shape[0])
+    height = int(frames.shape[1])
+    width = int(frames.shape[2])
+    array = frames.detach().cpu().clamp(0.0, 1.0).numpy()
+    if array.shape[-1] == 4:
+        array = array[..., :3]
+    array = (array * 255.0).round().astype(np.uint8)
+    pil_frames = [Image.fromarray(array[i], mode="RGB") for i in range(frame_count)]
+    return pil_frames, frame_count, width, height
+
+
 class DecorAnimationPlayer:
     @classmethod
     def INPUT_TYPES(cls):
@@ -486,43 +628,13 @@ class DecorAnimationPlayer:
     CATEGORY = "Ai说说/动画"
 
     def animate(self, image, mask, base_image, animation_json, fps_override=0, filename_prefix="decor_animation/decor_animation", mp4_crf=20):
-        config = _normalize_animation_config(animation_json)
-        fps = int(fps_override) if int(fps_override) > 0 else int(config.get("fps", 12))
-        fps = max(1, fps)
-        frame_count = _get_frame_count(config, fps)
-        last_frame = max(frame_count - 1, 0)
-
-        translate_x_track = _resolve_track(config, ("translate_x", "x", "position_x", "tx"), 0.0, last_frame)
-        translate_y_track = _resolve_track(config, ("translate_y", "y", "position_y", "ty"), 0.0, last_frame)
-        scale_track = _resolve_track(config, ("scale",), 1.0, last_frame)
-        scale_x_track = _resolve_track(config, ("scale_x", "sx"), 1.0, last_frame)
-        scale_y_track = _resolve_track(config, ("scale_y", "sy"), 1.0, last_frame)
-        rotation_track = _resolve_track(config, ("rotation", "angle"), 0.0, last_frame)
-        opacity_track = _resolve_track(config, ("opacity", "alpha"), 1.0, last_frame)
-
-        element_image = _tensor_image_to_pil(image)
-        mask_pil = _tensor_mask_to_pil(mask, element_image.size)
-        base_pil = _fit_base_image(_tensor_image_to_pil(base_image), element_image.size)
-        layers = _extract_element_layer(element_image, mask_pil)
-        frame_images: List[Image.Image] = []
-        for frame_index in range(frame_count):
-            uniform_scale = _sample_keyframes(scale_track, frame_index)
-            scale_x = uniform_scale * _sample_keyframes(scale_x_track, frame_index)
-            scale_y = uniform_scale * _sample_keyframes(scale_y_track, frame_index)
-
-            frame_rgba = _paste_transformed_element(
-                background=base_pil,
-                element=layers["element"],
-                bbox=layers["bbox"],
-                translate_x=_sample_keyframes(translate_x_track, frame_index),
-                translate_y=_sample_keyframes(translate_y_track, frame_index),
-                scale_x=scale_x,
-                scale_y=scale_y,
-                rotation=_sample_keyframes(rotation_track, frame_index),
-                opacity=_sample_keyframes(opacity_track, frame_index),
-            )
-            frame_images.append(frame_rgba)
-
+        frame_images, fps, frame_count = _render_animation_frames(
+            image=image,
+            mask=mask,
+            base_image=base_image,
+            animation_json=animation_json,
+            fps_override=fps_override,
+        )
         video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
         video_metadata = _build_video_metadata(
             full_path=video_path,
@@ -534,10 +646,18 @@ class DecorAnimationPlayer:
             height=frame_images[0].height,
         )
         frames_tensor = _pil_batch_to_comfy_image(frame_images)
-        ui_payload = {
-            "videos": [video_metadata],
-            "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"],
-        }
+        ui_payload = {"videos": [video_metadata], "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"]}
+        # #region debug-point B:player-return
+        _debug_report("B", "DecorAnimationPlayer.animate:return", "player return ui.videos", {
+            "ui_keys": list(ui_payload.keys()),
+            "videos_count": len(ui_payload.get("videos", [])),
+            "video_metadata": video_metadata,
+            "file_exists": os.path.exists(video_path.replace("/", os.sep)),
+            "file_size": os.path.getsize(video_path.replace("/", os.sep)) if os.path.exists(video_path.replace("/", os.sep)) else -1,
+            "result_len": 1,
+            "image_shape": list(frames_tensor.shape),
+        })
+        # #endregion
         return {
             "ui": ui_payload,
             "result": (frames_tensor,),
@@ -577,27 +697,8 @@ class DecorFrameSequencePreview:
         filename_prefix: str = "decor_animation/decor_sequence",
         mp4_crf: int = 20,
     ):
-        if not isinstance(frames, torch.Tensor):
-            raise TypeError(f"frames 必须是 IMAGE tensor, 实际收到 {type(frames).__name__}")
-        if frames.ndim != 4 or frames.shape[-1] not in (3, 4):
-            raise ValueError(
-                f"frames 形状必须是 [N, H, W, 3/4], 实际是 {tuple(frames.shape)}"
-            )
-        if frames.shape[0] <= 0:
-            raise ValueError("frames 是空批次")
-
-        frame_count = int(frames.shape[0])
-        height = int(frames.shape[1])
-        width = int(frames.shape[2])
+        pil_frames, frame_count, width, height = _tensor_frames_to_pil(frames)
         fps = max(1, int(fps))
-
-        # 把 [N, H, W, 3/4] 转成 PIL 列表，丢弃 alpha（h264 不支持）
-        array = frames.detach().cpu().clamp(0.0, 1.0).numpy()
-        if array.shape[-1] == 4:
-            array = array[..., :3]
-        array = (array * 255.0).round().astype(np.uint8)
-        pil_frames = [Image.fromarray(array[i], mode="RGB") for i in range(frame_count)]
-
         full_path, file_name, subfolder = _save_video_mp4(
             pil_frames, fps, filename_prefix, mp4_crf
         )
@@ -616,10 +717,124 @@ class DecorFrameSequencePreview:
             "videos": [video_metadata],
             "text": [f"preview video: {file_name} ({frame_count} frames @ {fps} fps)"],
         }
+        # #region debug-point C:preview-return
+        _debug_report("C", "DecorFrameSequencePreview.preview:return", "preview return ui.videos", {
+            "ui_keys": list(ui_payload.keys()),
+            "videos_count": len(ui_payload.get("videos", [])),
+            "video_metadata": video_metadata,
+            "file_exists": os.path.exists(full_path.replace("/", os.sep)),
+            "file_size": os.path.getsize(full_path.replace("/", os.sep)) if os.path.exists(full_path.replace("/", os.sep)) else -1,
+            "result_len": 1,
+            "frames_shape": list(frames.shape),
+        })
+        # #endregion
         return {
             "ui": ui_payload,
             "result": (frames,),
         }
+
+
+if HAS_OFFICIAL_PREVIEW_API:
+    class DecorAnimationPlayerLatest(io.ComfyNode):
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="DecorAnimationPlayer",
+                display_name="Decor Animation Player",
+                category="Ai说说/动画",
+                inputs=[
+                    io.Image.Input("image"),
+                    io.Mask.Input("mask"),
+                    io.Image.Input("base_image"),
+                    io.String.Input(
+                        "animation_json",
+                        multiline=True,
+                        default="{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -40, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 1.15, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": -6}, {\"frame\": 23, \"value\": 6, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}",
+                    ),
+                    io.Int.Input("fps_override", default=0, min=0, max=120, step=1),
+                    io.String.Input("filename_prefix", default="decor_animation/decor_animation"),
+                    io.Int.Input("mp4_crf", default=20, min=0, max=51, step=1),
+                ],
+                outputs=[io.Image.Output(display_name="image")],
+                is_output_node=True,
+            )
+
+        @classmethod
+        def execute(
+            cls,
+            image,
+            mask,
+            base_image,
+            animation_json,
+            fps_override=0,
+            filename_prefix="decor_animation/decor_animation",
+            mp4_crf=20,
+        ):
+            frame_images, fps, _frame_count = _render_animation_frames(
+                image=image,
+                mask=mask,
+                base_image=base_image,
+                animation_json=animation_json,
+                fps_override=fps_override,
+            )
+            video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
+            _ = video_path
+            frames_tensor = _pil_batch_to_comfy_image(frame_images)
+            return io.NodeOutput(
+                frames_tensor,
+                ui=_build_preview_ui(file_name, subfolder),
+            )
+
+
+    class DecorFrameSequencePreviewLatest(io.ComfyNode):
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="DecorFrameSequencePreview",
+                display_name="Decor Frame Sequence Preview",
+                category="Ai说说/动画",
+                inputs=[
+                    io.Image.Input("frames"),
+                    io.Int.Input("fps", default=12, min=1, max=120, step=1),
+                    io.String.Input("filename_prefix", default="decor_animation/decor_sequence"),
+                    io.Int.Input("mp4_crf", default=20, min=0, max=51, step=1),
+                ],
+                outputs=[io.Image.Output(display_name="image")],
+                is_output_node=True,
+            )
+
+        @classmethod
+        def execute(
+            cls,
+            frames,
+            fps=12,
+            filename_prefix="decor_animation/decor_sequence",
+            mp4_crf=20,
+        ):
+            pil_frames, _frame_count, _width, _height = _tensor_frames_to_pil(frames)
+            full_path, file_name, subfolder = _save_video_mp4(
+                pil_frames,
+                max(1, int(fps)),
+                filename_prefix,
+                int(mp4_crf),
+            )
+            _ = full_path
+            return io.NodeOutput(
+                frames,
+                ui=_build_preview_ui(file_name, subfolder),
+            )
+
+
+    class DecorAnimationExtension(ComfyExtension):
+        async def get_node_list(self):
+            return [
+                DecorAnimationPlayerLatest,
+                DecorFrameSequencePreviewLatest,
+            ]
+
+
+    async def comfy_entrypoint() -> DecorAnimationExtension:
+        return DecorAnimationExtension()
 
 
 NODE_CLASS_MAPPINGS = {
