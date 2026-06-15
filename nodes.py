@@ -17,40 +17,6 @@ except ImportError:  # pragma: no cover
     folder_paths = None
 
 
-# #region debug-point A:report-helper
-def _debug_report(hypothesis_id: str, location: str, msg: str, data: Dict[str, Any] | None = None, run_id: str = "pre-fix") -> None:
-    import json as _json, urllib.request as _request
-    _p = ".dbg/node-freeze-video.env"
-    _u, _s = "http://127.0.0.1:7777/event", "node-freeze-video"
-    try:
-        with open(_p, "r", encoding="utf-8") as _f:
-            _c = _f.read()
-        _u = next((l.split("=", 1)[1] for l in _c.splitlines() if l.startswith("DEBUG_SERVER_URL=")), _u)
-        _s = next((l.split("=", 1)[1] for l in _c.splitlines() if l.startswith("DEBUG_SESSION_ID=")), _s)
-    except Exception:
-        return
-    try:
-        _payload = {
-            "sessionId": _s,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "msg": f"[DEBUG] {msg}",
-            "data": data or {},
-        }
-        _request.urlopen(
-            _request.Request(
-                _u,
-                data=_json.dumps(_payload).encode(),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=1.0,
-        ).read()
-    except Exception:
-        pass
-# #endregion
-
-
 def _first_tensor_item(value: torch.Tensor) -> torch.Tensor:
     if value.dim() == 4:
         return value[0]
@@ -304,20 +270,34 @@ def _normalize_path_for_downstream(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
+def _build_video_metadata(
+    full_path: str,
+    file_name: str,
+    subfolder: str,
+    fps: int,
+    frame_count: int,
+    width: int,
+    height: int,
+) -> Dict[str, Any]:
+    normalized_path = _normalize_path_for_downstream(full_path)
+    return {
+        "filename": file_name,
+        "subfolder": subfolder,
+        "type": "output",
+        "format": "video/mp4",
+        "fps": fps,
+        "frame_count": frame_count,
+        "width": width,
+        "height": height,
+        "absolute_path": normalized_path,
+        "file_url": f"file:///{normalized_path}",
+    }
+
+
 def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: str, crf: int) -> Tuple[str, str, str]:
     if not frames:
         raise ValueError("没有可编码的视频帧。")
 
-    # #region debug-point C:video-save-start
-    _debug_report("C", "nodes.py:_save_video_mp4:start", "start mp4 encoding", {
-        "frame_count": len(frames),
-        "fps": fps,
-        "filename_prefix": filename_prefix,
-        "crf": crf,
-        "width": frames[0].width,
-        "height": frames[0].height,
-    })
-    # #endregion
     full_path, file_name, subfolder = _build_output_path(filename_prefix, frames[0].width, frames[0].height)
     container = av.open(full_path, mode="w", options={"movflags": "+faststart"})
     stream = container.add_stream("libx264", rate=Fraction(max(fps, 1), 1))
@@ -341,16 +321,13 @@ def _save_video_mp4(frames: Sequence[Image.Image], fps: int, filename_prefix: st
     finally:
         container.close()
 
-    # #region debug-point C:video-save-end
-    _debug_report("C", "nodes.py:_save_video_mp4:end", "finish mp4 encoding", {
-        "full_path": full_path,
-        "file_name": file_name,
-        "subfolder": subfolder,
-        "file_exists": os.path.exists(full_path),
-        "file_size": os.path.getsize(full_path) if os.path.exists(full_path) else -1,
-    })
-    # #endregion
-    return _normalize_path_for_downstream(full_path), file_name, subfolder
+    normalized_full_path = _normalize_path_for_downstream(full_path)
+    if not os.path.exists(normalized_full_path.replace("/", os.sep)):
+        raise RuntimeError(f"视频写出失败，文件不存在: {normalized_full_path}")
+    file_size = os.path.getsize(normalized_full_path.replace("/", os.sep))
+    if file_size <= 0:
+        raise RuntimeError(f"视频写出失败，文件大小为 0: {normalized_full_path}")
+    return normalized_full_path, file_name, subfolder
 
 
 class DecorAnimationPlayer:
@@ -376,17 +353,6 @@ class DecorAnimationPlayer:
     CATEGORY = "Ai说说/动画"
 
     def animate(self, image, mask, base_image, animation_json, fps_override=0, filename_prefix="decor_animation/decor_animation", mp4_crf=20):
-        # #region debug-point A:animate-entry
-        _debug_report("A", "nodes.py:animate:entry", "animate entry", {
-            "image_shape": list(image.shape) if hasattr(image, "shape") else None,
-            "mask_shape": list(mask.shape) if hasattr(mask, "shape") else None,
-            "base_image_shape": list(base_image.shape) if hasattr(base_image, "shape") else None,
-            "fps_override": fps_override,
-            "filename_prefix": filename_prefix,
-            "mp4_crf": mp4_crf,
-            "animation_json_length": len(animation_json) if isinstance(animation_json, str) else None,
-        })
-        # #endregion
         config = _normalize_animation_config(animation_json)
         fps = int(fps_override) if int(fps_override) > 0 else int(config.get("fps", 12))
         fps = max(1, fps)
@@ -405,16 +371,6 @@ class DecorAnimationPlayer:
         mask_pil = _tensor_mask_to_pil(mask, element_image.size)
         base_pil = _fit_base_image(_tensor_image_to_pil(base_image), element_image.size)
         layers = _extract_element_layer(element_image, mask_pil)
-        # #region debug-point D:prepared-assets
-        _debug_report("D", "nodes.py:animate:prepared", "prepared animation assets", {
-            "fps": fps,
-            "frame_count": frame_count,
-            "element_size": list(element_image.size),
-            "base_size": list(base_pil.size),
-            "bbox": list(layers["bbox"]),
-        })
-        # #endregion
-
         frame_images: List[Image.Image] = []
         for frame_index in range(frame_count):
             uniform_scale = _sample_keyframes(scale_track, frame_index)
@@ -433,33 +389,23 @@ class DecorAnimationPlayer:
                 opacity=_sample_keyframes(opacity_track, frame_index),
             )
             frame_images.append(frame_rgba)
-            # #region debug-point D:frame-loop-edge
-            if frame_index in (0, frame_count - 1):
-                _debug_report("D", "nodes.py:animate:frame-loop", "frame rendered", {
-                    "frame_index": frame_index,
-                    "frame_count": frame_count,
-                    "uniform_scale": uniform_scale,
-                    "scale_x": scale_x,
-                    "scale_y": scale_y,
-                })
-            # #endregion
 
         video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
+        video_metadata = _build_video_metadata(
+            full_path=video_path,
+            file_name=file_name,
+            subfolder=subfolder,
+            fps=fps,
+            frame_count=frame_count,
+            width=frame_images[0].width,
+            height=frame_images[0].height,
+        )
         ui_payload = {
-            "text": [f"saved video: {file_name} ({frame_count} frames @ {fps} fps)"],
+            "text": [f"saved video metadata: {file_name} ({frame_count} frames @ {fps} fps)"],
         }
-        # #region debug-point B:return-ui
-        _debug_report("B", "nodes.py:animate:return", "return result without video preview ui", {
-            "video_path": video_path,
-            "file_name": file_name,
-            "subfolder": subfolder,
-            "ui_has_videos": "videos" in ui_payload,
-            "result_type": "STRING",
-        })
-        # #endregion
         return {
             "ui": ui_payload,
-            "result": (video_path,),
+            "result": (json.dumps(video_metadata, ensure_ascii=False),),
         }
 
 
