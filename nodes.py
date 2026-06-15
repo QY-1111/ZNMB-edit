@@ -544,10 +544,90 @@ class DecorAnimationPlayer:
         }
 
 
+class DecorFrameSequencePreview:
+    """把上游输出的 IMAGE 帧序列直接在前端播放成动画。
+
+    接 `Decor Animation Player` 的 `image` 端口，把 `IMAGE` 帧序列编码成
+    浏览器原生可播的 h264 mp4，并通过 `ui.videos` 在节点卡片里播放。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "fps": ("INT", {"default": 12, "min": 1, "max": 120, "step": 1}),
+                "filename_prefix": ("STRING", {"default": "decor_animation/decor_sequence"}),
+            },
+            "optional": {
+                "mp4_crf": ("INT", {"default": 20, "min": 0, "max": 51, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "video")
+    FUNCTION = "preview"
+    CATEGORY = "Ai说说/动画"
+    OUTPUT_NODE = True
+
+    def preview(
+        self,
+        frames: torch.Tensor,
+        fps: int = 12,
+        filename_prefix: str = "decor_animation/decor_sequence",
+        mp4_crf: int = 20,
+    ):
+        if not isinstance(frames, torch.Tensor):
+            raise TypeError(f"frames 必须是 IMAGE tensor, 实际收到 {type(frames).__name__}")
+        if frames.ndim != 4 or frames.shape[-1] not in (3, 4):
+            raise ValueError(
+                f"frames 形状必须是 [N, H, W, 3/4], 实际是 {tuple(frames.shape)}"
+            )
+        if frames.shape[0] <= 0:
+            raise ValueError("frames 是空批次")
+
+        frame_count = int(frames.shape[0])
+        height = int(frames.shape[1])
+        width = int(frames.shape[2])
+        fps = max(1, int(fps))
+
+        # 把 [N, H, W, 3/4] 转成 PIL 列表，丢弃 alpha（h264 不支持）
+        array = frames.detach().cpu().clamp(0.0, 1.0).numpy()
+        if array.shape[-1] == 4:
+            array = array[..., :3]
+        array = (array * 255.0).round().astype(np.uint8)
+        pil_frames = [Image.fromarray(array[i], mode="RGB") for i in range(frame_count)]
+
+        full_path, file_name, subfolder = _save_video_mp4(
+            pil_frames, fps, filename_prefix, mp4_crf
+        )
+
+        video_metadata = _build_video_metadata(
+            full_path=full_path,
+            file_name=file_name,
+            subfolder=subfolder,
+            fps=fps,
+            frame_count=frame_count,
+            width=width,
+            height=height,
+        )
+
+        ui_payload = {
+            "videos": [video_metadata],
+            "text": [f"preview video: {file_name} ({frame_count} frames @ {fps} fps)"],
+        }
+        return {
+            "ui": ui_payload,
+            "result": (frames, json.dumps(video_metadata, ensure_ascii=False)),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "DecorAnimationPlayer": DecorAnimationPlayer,
+    "DecorFrameSequencePreview": DecorFrameSequencePreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DecorAnimationPlayer": "Decor Animation Player",
+    "DecorFrameSequencePreview": "Decor Frame Sequence Preview",
 }
