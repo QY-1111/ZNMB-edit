@@ -540,7 +540,7 @@ class DecorAnimationPlayer:
         }
         return {
             "ui": ui_payload,
-            "result": (frames_tensor, json.dumps(video_metadata, ensure_ascii=False)),
+            "result": (frames_tensor, video_metadata["absolute_path"]),
         }
 
 
@@ -618,7 +618,7 @@ class DecorFrameSequencePreview:
         }
         return {
             "ui": ui_payload,
-            "result": (frames, json.dumps(video_metadata, ensure_ascii=False)),
+            "result": (frames, video_metadata["absolute_path"]),
         }
 
 

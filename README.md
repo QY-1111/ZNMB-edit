@@ -42,7 +42,7 @@
 ### 输出
 
 - `image`: 所有帧合成图，`IMAGE` tensor，格式 `[N, H, W, 3]`，可直接接到 `Decor Frame Sequence Preview`、`Preview Image`、`Save Image`、`Image Batch` 等节点
-- `video`: 生成后的视频元数据 JSON 字符串，包含文件名、子目录、格式、尺寸、fps、帧数和绝对路径
+- `video`: 视频文件绝对路径字符串（正斜杠），下游节点可直接用 `av.open(path)` 等方式打开这个 mp4
 - 前端预览：节点会直接返回 `ui.videos`，可在 `ComfyUI` 节点卡片中原生播放
 
 ## 节点 2：Decor Frame Sequence Preview
@@ -59,7 +59,7 @@
 ### 输出
 
 - `image`: 透传 `frames`
-- `video`: 视频元数据 JSON 字符串
+- `video`: 视频文件绝对路径字符串（正斜杠），下游节点可直接用 `av.open(path)` 等方式打开这个 mp4
 - 前端预览：节点会直接返回 `ui.videos`，可在 `ComfyUI` 节点卡片中原生播放
 
 ### 推荐链路
