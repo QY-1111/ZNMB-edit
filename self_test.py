@@ -1,6 +1,6 @@
 """不依赖 ComfyUI 的最小自测脚本。
 
-读取 `测试样本/` 里的图片和 mask，按 `examples/sample_animation.json`
+读取 `测试样本/` 里的图片和 mask，构造 3 组动画 JSON，
 调用 `DecorAnimationPlayer` 的核心动画与编码流程，并把结果写到
 `测试样本/selftest_output.mp4`。
 """
@@ -26,7 +26,6 @@ SAMPLE_DIR = os.path.join(CURRENT_DIR, "测试样本")
 IMAGE_PATH = os.path.join(SAMPLE_DIR, "iamge.png")
 MASK_PATH = os.path.join(SAMPLE_DIR, "mask.png")
 BASE_PATH = os.path.join(SAMPLE_DIR, "base_image.png")
-ANIMATION_JSON_PATH = os.path.join(CURRENT_DIR, "examples", "sample_animation.json")
 OUTPUT_PATH = os.path.join(SAMPLE_DIR, "selftest_output.mp4")
 
 
@@ -63,19 +62,76 @@ def main() -> int:
         with Image.open(path) as img:
             print(f"[selftest] {label}: {path} -> size={img.size} mode={img.mode}")
 
-    with open(ANIMATION_JSON_PATH, "r", encoding="utf-8") as handle:
-        animation_json = handle.read()
-
     image_tensor = load_image_as_tensor(IMAGE_PATH)
     mask_tensor = load_mask_as_tensor(MASK_PATH)
     base_tensor = load_image_as_tensor(BASE_PATH)
+    animation_json_1 = """{
+  "fps": 12,
+  "frame_count": 24,
+  "translate_y": [
+    { "frame": 0, "value": 0, "easing": "ease_in_out" },
+    { "frame": 12, "value": -36, "easing": "ease_out" },
+    { "frame": 23, "value": 0, "easing": "ease_in" }
+  ],
+  "scale": [
+    { "frame": 0, "value": 1.0, "easing": "ease_in_out" },
+    { "frame": 12, "value": 1.12, "easing": "ease_in_out" },
+    { "frame": 23, "value": 1.0, "easing": "ease_in_out" }
+  ],
+  "rotation": [
+    { "frame": 0, "value": -8, "easing": "ease_in_out" },
+    { "frame": 12, "value": 8, "easing": "ease_in_out" },
+    { "frame": 23, "value": -8, "easing": "ease_in_out" }
+  ],
+  "opacity": 0.9
+}"""
+    animation_json_2 = """{
+  "fps": 12,
+  "frame_count": 24,
+  "translate_x": [
+    { "frame": 0, "value": -48, "easing": "ease_in_out" },
+    { "frame": 23, "value": 48, "easing": "ease_in_out" }
+  ],
+  "scale": {
+    "from": 0.88,
+    "to": 1.0,
+    "easing": "ease_in_out"
+  },
+  "rotation": 0,
+  "opacity": 0.55
+}"""
+    animation_json_3 = """{
+  "fps": 12,
+  "frame_count": 24,
+  "translate_y": [
+    { "frame": 0, "value": 28, "easing": "ease_in_out" },
+    { "frame": 12, "value": 10, "easing": "ease_out" },
+    { "frame": 23, "value": 28, "easing": "ease_in" }
+  ],
+  "scale": [
+    { "frame": 0, "value": 0.78, "easing": "ease_in_out" },
+    { "frame": 12, "value": 0.86, "easing": "ease_in_out" },
+    { "frame": 23, "value": 0.78, "easing": "ease_in_out" }
+  ],
+  "rotation": [
+    { "frame": 0, "value": 10, "easing": "ease_in_out" },
+    { "frame": 23, "value": -10, "easing": "ease_in_out" }
+  ],
+  "opacity": 0.45
+}"""
 
     try:
         result = nodes.DecorAnimationPlayer().animate(
-            image=image_tensor,
-            mask=mask_tensor,
+            image_1=image_tensor,
+            mask_1=mask_tensor,
+            animation_json_1=animation_json_1,
+            image_2=image_tensor,
+            mask_2=mask_tensor,
+            animation_json_2=animation_json_2,
+            image_3=image_tensor,
+            mask_3=mask_tensor,
+            animation_json_3=animation_json_3,
             base_image=base_tensor,
-            animation_json=animation_json,
             fps_override=0,
             filename_prefix="selftest/decor_animation",
             mp4_crf=20,

@@ -1,17 +1,17 @@
 # ComfyUI Decor Animation Player
 
-一个可直接放进 `ComfyUI/custom_nodes` 的自定义节点集合，用来把装饰元素图片按照动画 JSON 表达式播放、叠加到底图上，并直接输出可在 `ComfyUI` 前端播放的 `MP4` 视频。
+一个可直接放进 `ComfyUI/custom_nodes` 的自定义节点集合，用来把 3 组装饰元素图片分别按各自的动画 JSON 表达式播放、叠加到底图上，并直接输出可在 `ComfyUI` 前端播放的 `MP4` 视频。
 
 ## 节点列表
 
-- `Decor Animation Player` —— 读取装饰元素 + mask + 底图 + 动画 JSON，合成每帧并输出 `IMAGE` 序列，同时直接生成并预览视频
+- `Decor Animation Player` —— 读取 3 组装饰元素 + mask + 动画 JSON，再叠加到底图上，合成每帧并输出 `IMAGE` 序列，同时直接生成并预览视频
 - `Decor Frame Sequence Preview` —— 把上游 `IMAGE` 帧序列直接编码成可在 `ComfyUI` 前端播放的视频
 
 ## 功能
 
-- 输入一张图片
-- 输入该图片对应的 `mask`
-- 输入动画 `JSON` 文本，或直接传入一个 `.json` 文件路径
+- 输入三张装饰元素图片
+- 输入三张装饰元素对应的 `mask`
+- 输入三段动画 `JSON` 文本，或直接传入三个 `.json` 文件路径
 - 输入一个底图，作为最终画面的固定底板
 - 直接输出最终 `MP4` 视频
 - 节点会通过 `ComfyUI` 原生 `ui.videos` 在前端显示视频预览
@@ -31,10 +31,16 @@
 
 ### 输入
 
-- `image`: 要做动画的装饰元素图片
-- `mask`: 装饰元素遮罩
+- `image_1`: 第 1 个装饰元素图片
+- `mask_1`: 第 1 个装饰元素遮罩
+- `animation_json_1`: 第 1 个装饰元素动画配置
+- `image_2`: 第 2 个装饰元素图片
+- `mask_2`: 第 2 个装饰元素遮罩
+- `animation_json_2`: 第 2 个装饰元素动画配置
+- `image_3`: 第 3 个装饰元素图片
+- `mask_3`: 第 3 个装饰元素遮罩
+- `animation_json_3`: 第 3 个装饰元素动画配置
 - `base_image`: 最终画面的底图
-- `animation_json`: 动画配置，支持直接粘贴 JSON，也支持填写本地 `.json` 文件路径
 - `fps_override`: 大于 `0` 时覆盖 JSON 里的 `fps`
 - `filename_prefix`: 输出视频文件名前缀
 - `mp4_crf`: MP4 编码质量，越小画质越高、体积越大
@@ -144,9 +150,10 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 
 ## 说明
 
-- `image` 建议只放需要动的装饰元素，`mask` 用来精确限制参与动画的区域
-- 节点会根据 `mask` 自动裁出元素区域，再做位移、缩放、旋转和透明度变化
-- 每一帧会把动画元素合成到 `base_image` 上，最后编码成 `MP4`
+- `image_1` 到 `image_3` 建议只放需要动的装饰元素，`mask_1` 到 `mask_3` 用来精确限制参与动画的区域
+- 节点会分别根据每组 `mask` 自动裁出元素区域，再按对应的 `animation_json_x` 做位移、缩放、旋转和透明度变化
+- 每一帧会把三个动画元素依次合成到 `base_image` 上，最后编码成 `MP4`
+- 三段 JSON 可以写完全不同的动画表达式；如果 `fps_override=0`，节点会取三段 JSON 里最大的 `fps` 作为最终输出帧率
 - 输出视频会写到 `ComfyUI/output/`
 
 ## 示例

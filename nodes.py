@@ -93,6 +93,13 @@ def _tensor_mask_to_pil(mask: torch.Tensor, size: Sequence[int]) -> Image.Image:
     return pil_mask
 
 
+def _fit_image_to_size(image: Image.Image, target_size: Sequence[int]) -> Image.Image:
+    converted = image.convert("RGB")
+    if converted.size == tuple(target_size):
+        return converted
+    return converted.resize(tuple(target_size), Image.Resampling.LANCZOS)
+
+
 def _pil_to_comfy_image(pil: Image.Image) -> torch.Tensor:
     """把单张 PIL.Image 转成 ComfyUI 标准的 IMAGE tensor: [1, H, W, 3] float32 RGB."""
     rgb = pil.convert("RGB")
@@ -271,6 +278,30 @@ def _fit_base_image(base_image: Image.Image, target_size: Sequence[int]) -> Imag
     if converted.size == tuple(target_size):
         return converted
     return converted.resize(tuple(target_size), Image.Resampling.LANCZOS)
+
+
+def _build_element_animation(
+    image: torch.Tensor,
+    mask: torch.Tensor,
+    animation_json: str,
+    target_size: Sequence[int],
+    last_frame: int,
+) -> Dict[str, Any]:
+    config = _normalize_animation_config(animation_json)
+    fitted_image = _fit_image_to_size(_tensor_image_to_pil(image), target_size)
+    mask_pil = _tensor_mask_to_pil(mask, target_size)
+    layers = _extract_element_layer(fitted_image, mask_pil)
+    return {
+        "config": config,
+        "layer": layers,
+        "translate_x_track": _resolve_track(config, ("translate_x", "x", "position_x", "tx"), 0.0, last_frame),
+        "translate_y_track": _resolve_track(config, ("translate_y", "y", "position_y", "ty"), 0.0, last_frame),
+        "scale_track": _resolve_track(config, ("scale",), 1.0, last_frame),
+        "scale_x_track": _resolve_track(config, ("scale_x", "sx"), 1.0, last_frame),
+        "scale_y_track": _resolve_track(config, ("scale_y", "sy"), 1.0, last_frame),
+        "rotation_track": _resolve_track(config, ("rotation", "angle"), 0.0, last_frame),
+        "opacity_track": _resolve_track(config, ("opacity", "alpha"), 1.0, last_frame),
+    }
 
 
 def _paste_transformed_element(
@@ -539,48 +570,53 @@ def _encode_via_av(frames: Sequence[Image.Image], fps: int, crf: int, full_path:
 
 
 def _render_animation_frames(
-    image: torch.Tensor,
-    mask: torch.Tensor,
+    image_1: torch.Tensor,
+    mask_1: torch.Tensor,
+    animation_json_1: str,
+    image_2: torch.Tensor,
+    mask_2: torch.Tensor,
+    animation_json_2: str,
+    image_3: torch.Tensor,
+    mask_3: torch.Tensor,
+    animation_json_3: str,
     base_image: torch.Tensor,
-    animation_json: str,
     fps_override: int = 0,
 ) -> Tuple[List[Image.Image], int, int]:
-    config = _normalize_animation_config(animation_json)
-    fps = int(fps_override) if int(fps_override) > 0 else int(config.get("fps", 12))
+    animation_jsons = [animation_json_1, animation_json_2, animation_json_3]
+    configs = [_normalize_animation_config(text) for text in animation_jsons]
+    fps = int(fps_override) if int(fps_override) > 0 else max(int(config.get("fps", 12)) for config in configs)
     fps = max(1, fps)
-    frame_count = _get_frame_count(config, fps)
+    frame_count = max(_get_frame_count(config, fps) for config in configs)
     last_frame = max(frame_count - 1, 0)
 
-    translate_x_track = _resolve_track(config, ("translate_x", "x", "position_x", "tx"), 0.0, last_frame)
-    translate_y_track = _resolve_track(config, ("translate_y", "y", "position_y", "ty"), 0.0, last_frame)
-    scale_track = _resolve_track(config, ("scale",), 1.0, last_frame)
-    scale_x_track = _resolve_track(config, ("scale_x", "sx"), 1.0, last_frame)
-    scale_y_track = _resolve_track(config, ("scale_y", "sy"), 1.0, last_frame)
-    rotation_track = _resolve_track(config, ("rotation", "angle"), 0.0, last_frame)
-    opacity_track = _resolve_track(config, ("opacity", "alpha"), 1.0, last_frame)
+    base_rgb = _tensor_image_to_pil(base_image)
+    base_pil = _fit_base_image(base_rgb, base_rgb.size)
+    target_size = base_pil.size
 
-    element_image = _tensor_image_to_pil(image)
-    mask_pil = _tensor_mask_to_pil(mask, element_image.size)
-    base_pil = _fit_base_image(_tensor_image_to_pil(base_image), element_image.size)
-    layers = _extract_element_layer(element_image, mask_pil)
+    element_animations = [
+        _build_element_animation(image_1, mask_1, animation_json_1, target_size, last_frame),
+        _build_element_animation(image_2, mask_2, animation_json_2, target_size, last_frame),
+        _build_element_animation(image_3, mask_3, animation_json_3, target_size, last_frame),
+    ]
 
     frame_images: List[Image.Image] = []
     for frame_index in range(frame_count):
-        uniform_scale = _sample_keyframes(scale_track, frame_index)
-        scale_x = uniform_scale * _sample_keyframes(scale_x_track, frame_index)
-        scale_y = uniform_scale * _sample_keyframes(scale_y_track, frame_index)
-
-        frame_rgba = _paste_transformed_element(
-            background=base_pil,
-            element=layers["element"],
-            bbox=layers["bbox"],
-            translate_x=_sample_keyframes(translate_x_track, frame_index),
-            translate_y=_sample_keyframes(translate_y_track, frame_index),
-            scale_x=scale_x,
-            scale_y=scale_y,
-            rotation=_sample_keyframes(rotation_track, frame_index),
-            opacity=_sample_keyframes(opacity_track, frame_index),
-        )
+        frame_rgba = base_pil.copy()
+        for element_animation in element_animations:
+            uniform_scale = _sample_keyframes(element_animation["scale_track"], frame_index)
+            scale_x = uniform_scale * _sample_keyframes(element_animation["scale_x_track"], frame_index)
+            scale_y = uniform_scale * _sample_keyframes(element_animation["scale_y_track"], frame_index)
+            frame_rgba = _paste_transformed_element(
+                background=frame_rgba,
+                element=element_animation["layer"]["element"],
+                bbox=element_animation["layer"]["bbox"],
+                translate_x=_sample_keyframes(element_animation["translate_x_track"], frame_index),
+                translate_y=_sample_keyframes(element_animation["translate_y_track"], frame_index),
+                scale_x=scale_x,
+                scale_y=scale_y,
+                rotation=_sample_keyframes(element_animation["rotation_track"], frame_index),
+                opacity=_sample_keyframes(element_animation["opacity_track"], frame_index),
+            )
         frame_images.append(frame_rgba)
 
     return frame_images, fps, frame_count
@@ -610,10 +646,16 @@ class DecorAnimationPlayer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "mask": ("MASK",),
+                "image_1": ("IMAGE",),
+                "mask_1": ("MASK",),
+                "animation_json_1": ("STRING", {"multiline": True, "default": "{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -40, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 1.15, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": -6}, {\"frame\": 23, \"value\": 6, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}"}),
+                "image_2": ("IMAGE",),
+                "mask_2": ("MASK",),
+                "animation_json_2": ("STRING", {"multiline": True, "default": "{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_x\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": 32, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 0.92, \"easing\": \"ease_in_out\"}],\n  \"rotation\": 0,\n  \"opacity\": 1.0\n}"}),
+                "image_3": ("IMAGE",),
+                "mask_3": ("MASK",),
+                "animation_json_3": ("STRING", {"multiline": True, "default": "{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 12, \"value\": 18, \"easing\": \"ease_out\"}, {\"frame\": 23, \"value\": 0, \"easing\": \"ease_in\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 12, \"value\": 1.08, \"easing\": \"ease_in_out\"}, {\"frame\": 23, \"value\": 1.0, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -10, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}"}),
                 "base_image": ("IMAGE",),
-                "animation_json": ("STRING", {"multiline": True, "default": "{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -40, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 1.15, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": -6}, {\"frame\": 23, \"value\": 6, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}"}),
             },
             "optional": {
                 "fps_override": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1}),
@@ -627,12 +669,33 @@ class DecorAnimationPlayer:
     FUNCTION = "animate"
     CATEGORY = "Ai说说/动画"
 
-    def animate(self, image, mask, base_image, animation_json, fps_override=0, filename_prefix="decor_animation/decor_animation", mp4_crf=20):
+    def animate(
+        self,
+        image_1,
+        mask_1,
+        animation_json_1,
+        image_2,
+        mask_2,
+        animation_json_2,
+        image_3,
+        mask_3,
+        animation_json_3,
+        base_image,
+        fps_override=0,
+        filename_prefix="decor_animation/decor_animation",
+        mp4_crf=20,
+    ):
         frame_images, fps, frame_count = _render_animation_frames(
-            image=image,
-            mask=mask,
+            image_1=image_1,
+            mask_1=mask_1,
+            animation_json_1=animation_json_1,
+            image_2=image_2,
+            mask_2=mask_2,
+            animation_json_2=animation_json_2,
+            image_3=image_3,
+            mask_3=mask_3,
+            animation_json_3=animation_json_3,
             base_image=base_image,
-            animation_json=animation_json,
             fps_override=fps_override,
         )
         video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
@@ -743,14 +806,28 @@ if HAS_OFFICIAL_PREVIEW_API:
                 display_name="Decor Animation Player",
                 category="Ai说说/动画",
                 inputs=[
-                    io.Image.Input("image"),
-                    io.Mask.Input("mask"),
-                    io.Image.Input("base_image"),
+                    io.Image.Input("image_1"),
+                    io.Mask.Input("mask_1"),
                     io.String.Input(
-                        "animation_json",
+                        "animation_json_1",
                         multiline=True,
                         default="{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -40, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 1.15, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": -6}, {\"frame\": 23, \"value\": 6, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}",
                     ),
+                    io.Image.Input("image_2"),
+                    io.Mask.Input("mask_2"),
+                    io.String.Input(
+                        "animation_json_2",
+                        multiline=True,
+                        default="{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_x\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": 32, \"easing\": \"ease_in_out\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 23, \"value\": 0.92, \"easing\": \"ease_in_out\"}],\n  \"rotation\": 0,\n  \"opacity\": 1.0\n}",
+                    ),
+                    io.Image.Input("image_3"),
+                    io.Mask.Input("mask_3"),
+                    io.String.Input(
+                        "animation_json_3",
+                        multiline=True,
+                        default="{\n  \"fps\": 12,\n  \"frame_count\": 24,\n  \"translate_y\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 12, \"value\": 18, \"easing\": \"ease_out\"}, {\"frame\": 23, \"value\": 0, \"easing\": \"ease_in\"}],\n  \"scale\": [{\"frame\": 0, \"value\": 1.0}, {\"frame\": 12, \"value\": 1.08, \"easing\": \"ease_in_out\"}, {\"frame\": 23, \"value\": 1.0, \"easing\": \"ease_in_out\"}],\n  \"rotation\": [{\"frame\": 0, \"value\": 0}, {\"frame\": 23, \"value\": -10, \"easing\": \"ease_in_out\"}],\n  \"opacity\": 1.0\n}",
+                    ),
+                    io.Image.Input("base_image"),
                     io.Int.Input("fps_override", default=0, min=0, max=120, step=1),
                     io.String.Input("filename_prefix", default="decor_animation/decor_animation"),
                     io.Int.Input("mp4_crf", default=20, min=0, max=51, step=1),
@@ -762,19 +839,31 @@ if HAS_OFFICIAL_PREVIEW_API:
         @classmethod
         def execute(
             cls,
-            image,
-            mask,
+            image_1,
+            mask_1,
+            animation_json_1,
+            image_2,
+            mask_2,
+            animation_json_2,
+            image_3,
+            mask_3,
+            animation_json_3,
             base_image,
-            animation_json,
             fps_override=0,
             filename_prefix="decor_animation/decor_animation",
             mp4_crf=20,
         ):
             frame_images, fps, _frame_count = _render_animation_frames(
-                image=image,
-                mask=mask,
+                image_1=image_1,
+                mask_1=mask_1,
+                animation_json_1=animation_json_1,
+                image_2=image_2,
+                mask_2=mask_2,
+                animation_json_2=animation_json_2,
+                image_3=image_3,
+                mask_3=mask_3,
+                animation_json_3=animation_json_3,
                 base_image=base_image,
-                animation_json=animation_json,
                 fps_override=fps_override,
             )
             video_path, file_name, subfolder = _save_video_mp4(frame_images, fps, filename_prefix, int(mp4_crf))
