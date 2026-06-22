@@ -5,11 +5,11 @@
     "height": 1145
   },
   "placement": {
-    "left": 56,
-    "top": 72,
-    "width": 240,
-    "height": 240,
-    "rotation": -8,
+    "left": 280,
+    "top": 240,
+    "width": 220,
+    "height": 260,
+    "rotation": 0,
     "opacity": 1.0
   }
 }

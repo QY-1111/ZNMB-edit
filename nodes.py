@@ -394,6 +394,7 @@ def _resolve_layout_rect(
 
 
 def _resize_element_to_fit_box(element: Image.Image, target_width: float, target_height: float) -> Image.Image:
+    # 保持贴纸有效区域的原始宽高比，完整放进 placement 指定的目标框，避免拉伸变形。
     max_width = max(1, int(round(target_width)))
     max_height = max(1, int(round(target_height)))
     scale = min(max_width / max(element.width, 1), max_height / max(element.height, 1))
@@ -628,11 +629,17 @@ def _bbox_or_full(alpha: Image.Image) -> Sequence[int]:
     return bbox
 
 
+def _threshold_mask_for_bbox(mask: Image.Image, threshold: int = 8) -> Image.Image:
+    alpha = mask.convert("L")
+    threshold = max(0, min(255, int(threshold)))
+    return alpha.point(lambda px: 255 if px >= threshold else 0)
+
+
 def _extract_element_layer(image: Image.Image, mask: Image.Image) -> Dict[str, Any]:
     rgba = image.convert("RGBA")
     alpha = mask.convert("L")
     rgba.putalpha(alpha)
-    bbox = _bbox_or_full(alpha)
+    bbox = _bbox_or_full(_threshold_mask_for_bbox(alpha))
     return {
         "element": rgba.crop(bbox),
         "bbox": bbox,
