@@ -491,13 +491,19 @@ def _apply_layout_to_element(
         int(round(rect["target_width"])) != element.width
         or int(round(rect["target_height"])) != element.height
     ):
-        transformed = _resize_rgba_preserve_color(
-            element,
-            rect["target_width"],
-            rect["target_height"],
+        target_size = (
+            max(1, int(round(rect["target_width"]))),
+            max(1, int(round(rect["target_height"]))),
         )
+        rgb = Image.merge("RGB", element.convert("RGBA").split()[:3]).resize(
+            target_size,
+            Image.Resampling.NEAREST,
+        )
+        alpha = element.getchannel("A").resize(target_size, Image.Resampling.NEAREST)
+        alpha = _hard_mask(alpha)
+        transformed = Image.merge("RGBA", (*rgb.split(), alpha))
     else:
-        transformed = element.copy()
+        transformed = element.convert("RGBA").copy()
 
     paste_x = int(round(rect["center_x"] - transformed.width / 2.0))
     paste_y = int(round(rect["center_y"] - transformed.height / 2.0))
@@ -709,11 +715,18 @@ def _threshold_mask_for_bbox(mask: Image.Image, threshold: int = 8) -> Image.Ima
     return alpha.point(lambda px: 255 if px >= threshold else 0)
 
 
+def _hard_mask(mask: Image.Image) -> Image.Image:
+    alpha = mask.convert("L")
+    return alpha.point(lambda px: 255 if px > 0 else 0)
+
+
 def _extract_element_layer(image: Image.Image, mask: Image.Image) -> Dict[str, Any]:
     rgba = image.convert("RGBA")
-    alpha = mask.convert("L")
+    alpha = _hard_mask(mask)
     rgba.putalpha(alpha)
-    bbox = _bbox_or_full(_threshold_mask_for_bbox(alpha))
+    # 裁切框仍然用带阈值的 mask，避免弱噪点把有效区域错误放大；
+    # 但最终显示 alpha 继续保持硬二值，只保留 mask 区域。
+    bbox = _bbox_or_full(_threshold_mask_for_bbox(mask))
     return {
         "element": rgba.crop(bbox),
         "bbox": bbox,
