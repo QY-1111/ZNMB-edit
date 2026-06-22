@@ -472,8 +472,9 @@ def _resolve_layout_rect(
     width = max(float(width) * scale_to_base_x, 1.0)
     height = max(float(height) * scale_to_base_y, 1.0)
 
-    # 同时给出 width 和 height 时，按目标框等比缩放，不拉伸贴纸。
-    fit_scale = min(width / max(float(element_width), 1.0), height / max(float(element_height), 1.0))
+    # 同时给出 width 和 height 时，保持比例并按目标框做 cover 缩放：
+    # 至少填满一个维度，避免超宽/超高框里贴纸被 contain 得过小。
+    fit_scale = max(width / max(float(element_width), 1.0), height / max(float(element_height), 1.0))
     width = max(float(element_width) * fit_scale, 1.0)
     height = max(float(element_height) * fit_scale, 1.0)
 
