@@ -115,6 +115,372 @@ def _pil_batch_to_comfy_image(pils: Sequence[Image.Image]) -> torch.Tensor:
     return torch.from_numpy(np.stack(arrays, axis=0))
 
 
+def _pil_to_comfy_mask(pil: Image.Image) -> torch.Tensor:
+    """把单张 PIL.Image 转成 ComfyUI 标准的 MASK tensor: [1, H, W] float32."""
+    alpha = pil.convert("L")
+    array = np.asarray(alpha, dtype=np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
+def _strip_json_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.endswith("px"):
+            stripped = stripped[:-2].strip()
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_axis_value(value: Any, reference: float) -> float | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.endswith("%"):
+            try:
+                return reference * float(stripped[:-1].strip()) / 100.0
+            except ValueError:
+                return None
+    return _coerce_float(value)
+
+
+def _get_dict_value(data: Dict[str, Any], aliases: Sequence[str]) -> Any:
+    for alias in aliases:
+        if alias in data:
+            return data[alias]
+    return None
+
+
+def _first_dict(data: Any, aliases: Sequence[str]) -> Dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    for alias in aliases:
+        value = data.get(alias)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _normalize_position_config(position_json: str) -> Dict[str, Any]:
+    text = position_json.strip()
+    if not text:
+        raise ValueError("position_json 不能为空。")
+
+    if os.path.isfile(text):
+        with open(text, "r", encoding="utf-8") as handle:
+            text = handle.read()
+
+    try:
+        config = json.loads(_strip_json_code_fence(text))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"position_json 不是有效的 JSON: {exc}") from exc
+
+    if isinstance(config, list):
+        config = next((item for item in config if isinstance(item, dict)), None)
+
+    if not isinstance(config, dict):
+        raise ValueError("position_json 顶层必须是 JSON 对象。")
+    return config
+
+
+def _select_layout_block(config: Dict[str, Any]) -> Dict[str, Any]:
+    current = config
+    seen_ids = set()
+    while isinstance(current, dict) and id(current) not in seen_ids:
+        seen_ids.add(id(current))
+        nested = _first_dict(
+            current,
+            (
+                "layout",
+                "placement",
+                "position",
+                "rect",
+                "box",
+                "bbox",
+                "sticker",
+                "result",
+                "data",
+            ),
+        )
+        if nested is None:
+            return current
+        current = nested
+    return config
+
+
+def _extract_reference_canvas_size(config: Dict[str, Any], layout: Dict[str, Any]) -> Tuple[float | None, float | None]:
+    candidate_blocks = [
+        _first_dict(config, ("size", "canvas", "reference_image", "source_image", "source", "base_image", "image", "meta")),
+        _first_dict(layout, ("size", "canvas", "reference_image", "source_image", "source", "base_image", "image", "meta")),
+        config,
+    ]
+    for block in candidate_blocks:
+        if not isinstance(block, dict):
+            continue
+        width = _get_dict_value(
+            block,
+            (
+                "canvas_width",
+                "reference_width",
+                "source_width",
+                "image_width",
+                "base_width",
+                "original_width",
+                "width",
+            ),
+        )
+        height = _get_dict_value(
+            block,
+            (
+                "canvas_height",
+                "reference_height",
+                "source_height",
+                "image_height",
+                "base_height",
+                "original_height",
+                "height",
+            ),
+        )
+        width = _coerce_float(width)
+        height = _coerce_float(height)
+        if width and height:
+            return width, height
+    return None, None
+
+
+def _resolve_layout_rect(
+    config: Dict[str, Any],
+    base_size: Sequence[int],
+    element_size: Sequence[int],
+) -> Dict[str, float]:
+    base_width = float(base_size[0])
+    base_height = float(base_size[1])
+    element_width = float(element_size[0])
+    element_height = float(element_size[1])
+    layout = _select_layout_block(config)
+    ref_width, ref_height = _extract_reference_canvas_size(config, layout)
+    ref_width = ref_width or base_width
+    ref_height = ref_height or base_height
+    scale_to_base_x = base_width / max(ref_width, 1.0)
+    scale_to_base_y = base_height / max(ref_height, 1.0)
+
+    left = top = width = height = center_x = center_y = None
+
+    bbox = _get_dict_value(layout, ("bbox_xywh", "box_xywh", "rect_xywh"))
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        left = _coerce_axis_value(bbox[0], ref_width)
+        top = _coerce_axis_value(bbox[1], ref_height)
+        width = _coerce_axis_value(bbox[2], ref_width)
+        height = _coerce_axis_value(bbox[3], ref_height)
+
+    if left is None or top is None or width is None or height is None:
+        bbox = _get_dict_value(layout, ("bbox", "box", "rect"))
+        if isinstance(bbox, dict):
+            left = left if left is not None else _coerce_axis_value(
+                _get_dict_value(bbox, ("left", "x", "x1")), ref_width
+            )
+            top = top if top is not None else _coerce_axis_value(
+                _get_dict_value(bbox, ("top", "y", "y1")), ref_height
+            )
+            width = width if width is not None else _coerce_axis_value(
+                _get_dict_value(bbox, ("width", "w")), ref_width
+            )
+            height = height if height is not None else _coerce_axis_value(
+                _get_dict_value(bbox, ("height", "h")), ref_height
+            )
+            right = _coerce_axis_value(_get_dict_value(bbox, ("right", "x2")), ref_width)
+            bottom = _coerce_axis_value(_get_dict_value(bbox, ("bottom", "y2")), ref_height)
+            if width is None and left is not None and right is not None:
+                width = right - left
+            if height is None and top is not None and bottom is not None:
+                height = bottom - top
+        elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            raw_left = _coerce_axis_value(bbox[0], ref_width)
+            raw_top = _coerce_axis_value(bbox[1], ref_height)
+            raw_third = _coerce_axis_value(bbox[2], ref_width)
+            raw_fourth = _coerce_axis_value(bbox[3], ref_height)
+            if None not in (raw_left, raw_top, raw_third, raw_fourth):
+                left = raw_left
+                top = raw_top
+                if raw_third > raw_left and raw_fourth > raw_top:
+                    width = raw_third - raw_left
+                    height = raw_fourth - raw_top
+                else:
+                    width = raw_third
+                    height = raw_fourth
+
+    if left is None:
+        left = _coerce_axis_value(_get_dict_value(layout, ("left", "x")), ref_width)
+    if top is None:
+        top = _coerce_axis_value(_get_dict_value(layout, ("top", "y")), ref_height)
+    if width is None:
+        width = _coerce_axis_value(_get_dict_value(layout, ("width", "w")), ref_width)
+    if height is None:
+        height = _coerce_axis_value(_get_dict_value(layout, ("height", "h")), ref_height)
+
+    center_x = _coerce_axis_value(_get_dict_value(layout, ("center_x", "cx")), ref_width)
+    center_y = _coerce_axis_value(_get_dict_value(layout, ("center_y", "cy")), ref_height)
+    right = _coerce_axis_value(_get_dict_value(layout, ("right", "x2")), ref_width)
+    bottom = _coerce_axis_value(_get_dict_value(layout, ("bottom", "y2")), ref_height)
+
+    if width is None or height is None:
+        scale = _coerce_float(_get_dict_value(layout, ("scale",)))
+        scale_x = _coerce_float(_get_dict_value(layout, ("scale_x", "sx")))
+        scale_y = _coerce_float(_get_dict_value(layout, ("scale_y", "sy")))
+        scale_x = scale_x if scale_x is not None else (scale if scale is not None else 1.0)
+        scale_y = scale_y if scale_y is not None else (scale if scale is not None else 1.0)
+        if width is None:
+            width = element_width * max(scale_x, 0.01)
+        if height is None:
+            height = element_height * max(scale_y, 0.01)
+
+    width = max((width or element_width) * scale_to_base_x, 1.0)
+    height = max((height or element_height) * scale_to_base_y, 1.0)
+
+    if left is not None:
+        left *= scale_to_base_x
+    if top is not None:
+        top *= scale_to_base_y
+    if center_x is not None:
+        center_x *= scale_to_base_x
+    if center_y is not None:
+        center_y *= scale_to_base_y
+    if right is not None:
+        right *= scale_to_base_x
+    if bottom is not None:
+        bottom *= scale_to_base_y
+
+    if left is None and right is not None:
+        left = right - width
+    if top is None and bottom is not None:
+        top = bottom - height
+    if center_x is None:
+        center_x = (left + width / 2.0) if left is not None else base_width / 2.0
+    if center_y is None:
+        center_y = (top + height / 2.0) if top is not None else base_height / 2.0
+
+    rotation = _coerce_float(_get_dict_value(layout, ("rotation", "angle"))) or 0.0
+    opacity = _coerce_float(_get_dict_value(layout, ("opacity", "alpha")))
+    opacity = 1.0 if opacity is None else max(0.0, min(1.0, opacity))
+
+    return {
+        "center_x": center_x,
+        "center_y": center_y,
+        "target_width": width,
+        "target_height": height,
+        "rotation": rotation,
+        "opacity": opacity,
+    }
+
+
+def _resize_element_to_fit_box(element: Image.Image, target_width: float, target_height: float) -> Image.Image:
+    max_width = max(1, int(round(target_width)))
+    max_height = max(1, int(round(target_height)))
+    scale = min(max_width / max(element.width, 1), max_height / max(element.height, 1))
+    scale = max(scale, 0.01)
+    resize_width = max(1, int(round(element.width * scale)))
+    resize_height = max(1, int(round(element.height * scale)))
+    return element.resize((resize_width, resize_height), Image.Resampling.BICUBIC)
+
+
+def _apply_layout_to_element(
+    base_image: Image.Image,
+    element: Image.Image,
+    position_json: str,
+) -> Tuple[Image.Image, Image.Image]:
+    config = _normalize_position_config(position_json)
+    rect = _resolve_layout_rect(config, base_image.size, element.size)
+    transformed = _resize_element_to_fit_box(
+        element,
+        rect["target_width"],
+        rect["target_height"],
+    )
+    transformed = transformed.rotate(
+        -rect["rotation"],
+        resample=Image.Resampling.BICUBIC,
+        expand=True,
+    )
+
+    if rect["opacity"] < 1.0:
+        alpha = transformed.getchannel("A")
+        alpha = alpha.point(lambda px: int(round(px * rect["opacity"])))
+        transformed.putalpha(alpha)
+
+    paste_x = int(round(rect["center_x"] - transformed.width / 2.0))
+    paste_y = int(round(rect["center_y"] - transformed.height / 2.0))
+
+    canvas = base_image.copy()
+    canvas.paste(transformed, (paste_x, paste_y), transformed)
+
+    placed_mask = Image.new("L", base_image.size, 0)
+    placed_mask.paste(transformed.getchannel("A"), (paste_x, paste_y))
+    return canvas, placed_mask
+
+
+def _build_positioned_sticker(
+    sticker_image: torch.Tensor,
+    sticker_mask: torch.Tensor,
+    position_json: str,
+    base_size: Sequence[int],
+) -> Tuple[Image.Image, Image.Image]:
+    image_pil = _tensor_image_to_pil(sticker_image)
+    mask_pil = _tensor_mask_to_pil(sticker_mask, image_pil.size)
+    layer = _extract_element_layer(image_pil, mask_pil)
+    element = layer["element"]
+    base_rgba = Image.new("RGBA", tuple(base_size), (0, 0, 0, 0))
+    return _apply_layout_to_element(base_rgba, element, position_json)
+
+
+def _compose_stickers(
+    sticker_1: torch.Tensor,
+    mask_1: torch.Tensor,
+    position_json_1: str,
+    sticker_2: torch.Tensor,
+    mask_2: torch.Tensor,
+    position_json_2: str,
+    sticker_3: torch.Tensor,
+    mask_3: torch.Tensor,
+    position_json_3: str,
+    base_image: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    base_rgba = _tensor_image_to_pil(base_image).convert("RGBA")
+    sticker_layer_1, output_mask_1 = _build_positioned_sticker(sticker_1, mask_1, position_json_1, base_rgba.size)
+    sticker_layer_2, output_mask_2 = _build_positioned_sticker(sticker_2, mask_2, position_json_2, base_rgba.size)
+    sticker_layer_3, output_mask_3 = _build_positioned_sticker(sticker_3, mask_3, position_json_3, base_rgba.size)
+
+    composed = base_rgba.copy()
+    composed.alpha_composite(sticker_layer_1)
+    composed.alpha_composite(sticker_layer_2)
+    composed.alpha_composite(sticker_layer_3)
+
+    return (
+        _pil_to_comfy_image(composed),
+        _pil_to_comfy_mask(output_mask_1),
+        _pil_to_comfy_mask(output_mask_2),
+        _pil_to_comfy_mask(output_mask_3),
+    )
+
+
 @dataclass
 class Keyframe:
     frame: int
@@ -727,6 +1093,73 @@ class DecorAnimationPlayer:
         }
 
 
+class DecorStickerLayoutComposer:
+    @classmethod
+    def INPUT_TYPES(cls):
+        default_position_json = (
+            '{\n'
+            '  "id": "1",\n'
+            '  "size": {\n'
+            '    "width": 912,\n'
+            '    "height": 1145\n'
+            '  },\n'
+            '  "placement": {\n'
+            '    "left": 56,\n'
+            '    "top": 72,\n'
+            '    "width": 240,\n'
+            '    "height": 240,\n'
+            '    "rotation": -8,\n'
+            '    "opacity": 1.0\n'
+            '  }\n'
+            '}'
+        )
+        return {
+            "required": {
+                "sticker_1": ("IMAGE",),
+                "mask_1": ("MASK",),
+                "position_json_1": ("STRING", {"multiline": True, "default": default_position_json}),
+                "sticker_2": ("IMAGE",),
+                "mask_2": ("MASK",),
+                "position_json_2": ("STRING", {"multiline": True, "default": default_position_json}),
+                "sticker_3": ("IMAGE",),
+                "mask_3": ("MASK",),
+                "position_json_3": ("STRING", {"multiline": True, "default": default_position_json}),
+                "base_image": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "MASK", "MASK")
+    RETURN_NAMES = ("image", "mask_1", "mask_2", "mask_3")
+    FUNCTION = "compose"
+    CATEGORY = "Ai说说/排版"
+
+    def compose(
+        self,
+        sticker_1,
+        mask_1,
+        position_json_1,
+        sticker_2,
+        mask_2,
+        position_json_2,
+        sticker_3,
+        mask_3,
+        position_json_3,
+        base_image,
+    ):
+        return _compose_stickers(
+            sticker_1=sticker_1,
+            mask_1=mask_1,
+            position_json_1=position_json_1,
+            sticker_2=sticker_2,
+            mask_2=mask_2,
+            position_json_2=position_json_2,
+            sticker_3=sticker_3,
+            mask_3=mask_3,
+            position_json_3=position_json_3,
+            base_image=base_image,
+        )
+
+
 class DecorFrameSequencePreview:
     """把上游输出的 IMAGE 帧序列直接在前端播放成动画。
 
@@ -875,6 +1308,80 @@ if HAS_OFFICIAL_PREVIEW_API:
             )
 
 
+    class DecorStickerLayoutComposerLatest(io.ComfyNode):
+        @classmethod
+        def define_schema(cls):
+            default_position_json = (
+                '{\n'
+                '  "id": "1",\n'
+                '  "size": {\n'
+                '    "width": 912,\n'
+                '    "height": 1145\n'
+                '  },\n'
+                '  "placement": {\n'
+                '    "left": 56,\n'
+                '    "top": 72,\n'
+                '    "width": 240,\n'
+                '    "height": 240,\n'
+                '    "rotation": -8,\n'
+                '    "opacity": 1.0\n'
+                '  }\n'
+                '}'
+            )
+            return io.Schema(
+                node_id="DecorStickerLayoutComposer",
+                display_name="Decor Sticker Layout Composer",
+                category="Ai说说/排版",
+                inputs=[
+                    io.Image.Input("sticker_1"),
+                    io.Mask.Input("mask_1"),
+                    io.String.Input("position_json_1", multiline=True, default=default_position_json),
+                    io.Image.Input("sticker_2"),
+                    io.Mask.Input("mask_2"),
+                    io.String.Input("position_json_2", multiline=True, default=default_position_json),
+                    io.Image.Input("sticker_3"),
+                    io.Mask.Input("mask_3"),
+                    io.String.Input("position_json_3", multiline=True, default=default_position_json),
+                    io.Image.Input("base_image"),
+                ],
+                outputs=[
+                    io.Image.Output(display_name="image"),
+                    io.Mask.Output(display_name="mask_1"),
+                    io.Mask.Output(display_name="mask_2"),
+                    io.Mask.Output(display_name="mask_3"),
+                ],
+            )
+
+        @classmethod
+        def execute(
+            cls,
+            sticker_1,
+            mask_1,
+            position_json_1,
+            sticker_2,
+            mask_2,
+            position_json_2,
+            sticker_3,
+            mask_3,
+            position_json_3,
+            base_image,
+        ):
+            return io.NodeOutput(
+                *_compose_stickers(
+                    sticker_1=sticker_1,
+                    mask_1=mask_1,
+                    position_json_1=position_json_1,
+                    sticker_2=sticker_2,
+                    mask_2=mask_2,
+                    position_json_2=position_json_2,
+                    sticker_3=sticker_3,
+                    mask_3=mask_3,
+                    position_json_3=position_json_3,
+                    base_image=base_image,
+                )
+            )
+
+
     class DecorFrameSequencePreviewLatest(io.ComfyNode):
         @classmethod
         def define_schema(cls):
@@ -918,6 +1425,7 @@ if HAS_OFFICIAL_PREVIEW_API:
         async def get_node_list(self):
             return [
                 DecorAnimationPlayerLatest,
+                DecorStickerLayoutComposerLatest,
                 DecorFrameSequencePreviewLatest,
             ]
 
@@ -928,10 +1436,12 @@ if HAS_OFFICIAL_PREVIEW_API:
 
 NODE_CLASS_MAPPINGS = {
     "DecorAnimationPlayer": DecorAnimationPlayer,
+    "DecorStickerLayoutComposer": DecorStickerLayoutComposer,
     "DecorFrameSequencePreview": DecorFrameSequencePreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DecorAnimationPlayer": "Decor Animation Player",
+    "DecorStickerLayoutComposer": "Decor Sticker Layout Composer",
     "DecorFrameSequencePreview": "Decor Frame Sequence Preview",
 }

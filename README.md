@@ -1,10 +1,11 @@
 # ComfyUI Decor Animation Player
 
-一个可直接放进 `ComfyUI/custom_nodes` 的自定义节点集合，用来把 3 组装饰元素图片分别按各自的动画 JSON 表达式播放、叠加到底图上，并直接输出可在 `ComfyUI` 前端播放的 `MP4` 视频。
+一个可直接放进 `ComfyUI/custom_nodes` 的自定义节点集合，用来把 3 组装饰元素图片分别按各自的动画 JSON 表达式播放、叠加到底图上，并直接输出可在 `ComfyUI` 前端播放的 `MP4` 视频。同时也提供一个静态排版节点，可根据 VLM 输出的位置 JSON 把 3 个贴纸摆放到底图上。
 
 ## 节点列表
 
 - `Decor Animation Player` —— 读取 3 组装饰元素 + mask + 动画 JSON，再叠加到底图上，合成每帧并输出 `IMAGE` 序列，同时直接生成并预览视频
+- `Decor Sticker Layout Composer` —— 读取 3 组贴纸 + mask + 位置 JSON，把贴纸按排版信息缩放、旋转并叠加到底图上，同时输出 3 个排版后的 mask
 - `Decor Frame Sequence Preview` —— 把上游 `IMAGE` 帧序列直接编码成可在 `ComfyUI` 前端播放的视频
 
 ## 功能
@@ -22,6 +23,7 @@
 2. `pip install -r requirements.txt` 安装 `imageio-ffmpeg` 等依赖
 3. 重启 `ComfyUI`
 4. 在节点分类 `Ai说说/动画` 中找到这两个节点
+5. 在节点分类 `Ai说说/排版` 中找到静态贴纸排版节点
 
 > 节点会优先调用 `imageio-ffmpeg` 自带的 `ffmpeg` 子进程写出 **h264 / yuv420p** 的 MP4，
 > 这种格式浏览器原生支持，节点卡片可以直接预览。
@@ -74,6 +76,164 @@
 Decor Animation Player (image 输出)
         ↓ frames
 Decor Frame Sequence Preview (节点卡片直接播放)
+```
+
+## 节点 3：Decor Sticker Layout Composer
+
+把 3 个贴纸根据各自的位置 JSON 排版到底图上，适合接收 VLM 生成的排版结果。
+
+### 输入
+
+- `sticker_1`: 第 1 个贴纸图片
+- `mask_1`: 第 1 个贴纸对应的遮罩
+- `position_json_1`: 第 1 个贴纸的位置 JSON
+- `sticker_2`: 第 2 个贴纸图片
+- `mask_2`: 第 2 个贴纸对应的遮罩
+- `position_json_2`: 第 2 个贴纸的位置 JSON
+- `sticker_3`: 第 3 个贴纸图片
+- `mask_3`: 第 3 个贴纸对应的遮罩
+- `position_json_3`: 第 3 个贴纸的位置 JSON
+- `base_image`: 被贴纸覆盖的底图
+
+### 输出
+
+- `image`: 三个贴纸排版叠加后的最终图像
+- `mask_1`: 贴纸 1 经缩放、旋转、排版后回投到底图坐标系的 mask
+- `mask_2`: 贴纸 2 经缩放、旋转、排版后回投到底图坐标系的 mask
+- `mask_3`: 贴纸 3 经缩放、旋转、排版后回投到底图坐标系的 mask
+
+### 位置 JSON
+
+支持以下常见字段，字段名可以混用：
+
+- 位置：`x` / `y` / `left` / `top`
+- 中心点：`center_x` / `center_y` / `cx` / `cy`
+- 尺寸：`width` / `height` / `w` / `h`
+- 边界框：`bbox` / `box` / `rect`
+- 旋转：`rotation` / `angle`
+- 透明度：`opacity` / `alpha`
+- 参考画布尺寸：`canvas_width` / `canvas_height` / `source_width` / `source_height`
+
+最简单的示例：
+
+```json
+{
+  "canvas_width": 1080,
+  "canvas_height": 1920,
+  "x": 120,
+  "y": 240,
+  "width": 320,
+  "height": 320,
+  "rotation": -8,
+  "opacity": 1.0
+}
+```
+
+也支持 `bbox` 写法：
+
+```json
+{
+  "canvas_width": 1080,
+  "canvas_height": 1920,
+  "bbox": {
+    "left": 120,
+    "top": 240,
+    "width": 320,
+    "height": 320
+  },
+  "rotation": 12
+}
+```
+
+### 推荐给 VLM 的固定格式
+
+虽然节点兼容多种别名写法，但如果你要让 `VLM` 稳定输出、并直接喂给这个节点，建议固定成下面这个单贴纸格式，不要混用别名：
+
+```json
+{
+  "id": "1",
+  "size": {
+    "width": 912,
+    "height": 1145
+  },
+  "placement": {
+    "left": 56,
+    "top": 72,
+    "width": 240,
+    "height": 240,
+    "rotation": -8,
+    "opacity": 1.0
+  }
+}
+```
+
+推荐原因：
+
+- 只保留一套字段名，避免 `x/y`、`bbox`、`center_x` 混用
+- `canvas.width` 和 `canvas.height` 明确说明这是 VLM 参考原图尺寸
+- `placement.left/top/width/height` 语义清晰，节点可以直接解析
+- 所有值都用像素和数值，避免百分比、中文单位和模糊描述
+
+### VLM 输出约束
+
+建议你在提示词里明确要求模型遵守这些规则：
+
+- 只输出纯 JSON，不要输出 Markdown，不要包在代码块里
+- 顶层必须是对象，不要输出数组
+- 必须包含 `id`、`size`、`placement`
+- `size.width`、`size.height` 必须等于 VLM 观察时原图尺寸
+- `placement.left`、`top`、`width`、`height` 必须是像素数值
+- `rotation` 单位固定为角度，顺时针为正值
+- `opacity` 固定为 `0.0` 到 `1.0`
+- 不要输出解释文字、置信度、推理过程、建议语句
+- 不要输出百分比字符串、`px` 字符串、自然语言位置描述
+
+### 三贴纸总响应模板
+
+如果你想让 VLM 一次性返回三张贴纸的位置，推荐总响应格式固定如下，然后把 `stickers` 里的三个对象分别接到节点的 `position_json_1/2/3`：
+
+```json
+{
+  "size": {
+    "width": 912,
+    "height": 1145
+  },
+  "stickers": [
+    {
+      "id": "1",
+      "placement": {
+        "left": 56,
+        "top": 72,
+        "width": 240,
+        "height": 240,
+        "rotation": -8,
+        "opacity": 1.0
+      }
+    },
+    {
+      "id": "2",
+      "placement": {
+        "left": 626,
+        "top": 118,
+        "width": 220,
+        "height": 220,
+        "rotation": 10,
+        "opacity": 1.0
+      }
+    },
+    {
+      "id": "3",
+      "placement": {
+        "left": 286,
+        "top": 720,
+        "width": 340,
+        "height": 220,
+        "rotation": -6,
+        "opacity": 1.0
+      }
+    }
+  ]
+}
 ```
 
 ## JSON 格式

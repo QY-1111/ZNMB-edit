@@ -1,0 +1,41 @@
+{
+  "size": {
+    "width": 912,
+    "height": 1145
+  },
+  "stickers": [
+    {
+      "id": "1",
+      "placement": {
+        "left": 56,
+        "top": 72,
+        "width": 240,
+        "height": 240,
+        "rotation": -8,
+        "opacity": 1.0
+      }
+    },
+    {
+      "id": "2",
+      "placement": {
+        "left": 626,
+        "top": 118,
+        "width": 220,
+        "height": 220,
+        "rotation": 10,
+        "opacity": 1.0
+      }
+    },
+    {
+      "id": "3",
+      "placement": {
+        "left": 286,
+        "top": 720,
+        "width": 340,
+        "height": 220,
+        "rotation": -6,
+        "opacity": 1.0
+      }
+    }
+  ]
+}
