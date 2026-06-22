@@ -404,23 +404,95 @@ def _resize_element_to_fit_box(element: Image.Image, target_width: float, target
     return element.resize((resize_width, resize_height), Image.Resampling.BICUBIC)
 
 
+def _premultiply_rgba(image: Image.Image) -> Image.Image:
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[..., 3:4] / 255.0
+    rgba[..., :3] *= alpha
+    return Image.fromarray(np.clip(np.round(rgba), 0, 255).astype(np.uint8), mode="RGBA")
+
+
+def _unpremultiply_rgba(image: Image.Image) -> Image.Image:
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[..., 3:4]
+    safe_alpha = np.where(alpha > 0.0, alpha, 1.0)
+    rgba[..., :3] = np.where(
+        alpha > 0.0,
+        np.clip((rgba[..., :3] * 255.0) / safe_alpha, 0.0, 255.0),
+        0.0,
+    )
+    return Image.fromarray(np.clip(np.round(rgba), 0, 255).astype(np.uint8), mode="RGBA")
+
+
+def _resize_rgba_preserve_color(element: Image.Image, target_width: float, target_height: float) -> Image.Image:
+    resized = _resize_element_to_fit_box(element, target_width, target_height)
+    premultiplied = _premultiply_rgba(element)
+    rgb = Image.merge("RGB", premultiplied.split()[:3])
+    alpha = premultiplied.getchannel("A")
+    rgb = rgb.resize(resized.size, Image.Resampling.NEAREST)
+    alpha = alpha.resize(resized.size, Image.Resampling.BICUBIC)
+    return _unpremultiply_rgba(Image.merge("RGBA", (*rgb.split(), alpha)))
+
+
+def _rotate_rgba_preserve_color(element: Image.Image, rotation: float) -> Image.Image:
+    premultiplied = _premultiply_rgba(element)
+    rgb = Image.merge("RGB", premultiplied.split()[:3])
+    alpha = premultiplied.getchannel("A")
+    rgb = rgb.rotate(
+        -rotation,
+        resample=Image.Resampling.NEAREST,
+        expand=True,
+        fillcolor=(0, 0, 0),
+    )
+    alpha = alpha.rotate(
+        -rotation,
+        resample=Image.Resampling.BICUBIC,
+        expand=True,
+        fillcolor=0,
+    )
+    return _unpremultiply_rgba(Image.merge("RGBA", (*rgb.split(), alpha)))
+
+
+def _resize_rgba_smooth(element: Image.Image, target_width: float, target_height: float) -> Image.Image:
+    resized = _resize_element_to_fit_box(element, target_width, target_height)
+    premultiplied = _premultiply_rgba(element)
+    premultiplied = premultiplied.resize(resized.size, Image.Resampling.BICUBIC)
+    return _unpremultiply_rgba(premultiplied)
+
+
+def _rotate_rgba_smooth(element: Image.Image, rotation: float) -> Image.Image:
+    premultiplied = _premultiply_rgba(element)
+    premultiplied = premultiplied.rotate(
+        -rotation,
+        resample=Image.Resampling.BICUBIC,
+        expand=True,
+        fillcolor=(0, 0, 0, 0),
+    )
+    return _unpremultiply_rgba(premultiplied)
+
+
 def _apply_layout_to_element(
     base_image: Image.Image,
     element: Image.Image,
     position_json: str,
+    transform_mode: str = "颜色优先",
 ) -> Tuple[Image.Image, Image.Image]:
     config = _normalize_position_config(position_json)
     rect = _resolve_layout_rect(config, base_image.size, element.size)
-    transformed = _resize_element_to_fit_box(
-        element,
-        rect["target_width"],
-        rect["target_height"],
-    )
-    transformed = transformed.rotate(
-        -rect["rotation"],
-        resample=Image.Resampling.BICUBIC,
-        expand=True,
-    )
+    transform_mode = str(transform_mode or "颜色优先").strip()
+    if transform_mode == "平滑优先":
+        transformed = _resize_rgba_smooth(
+            element,
+            rect["target_width"],
+            rect["target_height"],
+        )
+        transformed = _rotate_rgba_smooth(transformed, rect["rotation"])
+    else:
+        transformed = _resize_rgba_preserve_color(
+            element,
+            rect["target_width"],
+            rect["target_height"],
+        )
+        transformed = _rotate_rgba_preserve_color(transformed, rect["rotation"])
 
     if rect["opacity"] < 1.0:
         alpha = transformed.getchannel("A")
@@ -443,13 +515,14 @@ def _build_positioned_sticker(
     sticker_mask: torch.Tensor,
     position_json: str,
     base_size: Sequence[int],
+    transform_mode: str = "颜色优先",
 ) -> Tuple[Image.Image, Image.Image]:
     image_pil = _tensor_image_to_pil(sticker_image)
     mask_pil = _tensor_mask_to_pil(sticker_mask, image_pil.size)
     layer = _extract_element_layer(image_pil, mask_pil)
     element = layer["element"]
     base_rgba = Image.new("RGBA", tuple(base_size), (0, 0, 0, 0))
-    return _apply_layout_to_element(base_rgba, element, position_json)
+    return _apply_layout_to_element(base_rgba, element, position_json, transform_mode=transform_mode)
 
 
 def _compose_stickers(
@@ -463,11 +536,12 @@ def _compose_stickers(
     mask_3: torch.Tensor,
     position_json_3: str,
     base_image: torch.Tensor,
+    transform_mode: str = "颜色优先",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     base_rgba = _tensor_image_to_pil(base_image).convert("RGBA")
-    sticker_layer_1, output_mask_1 = _build_positioned_sticker(sticker_1, mask_1, position_json_1, base_rgba.size)
-    sticker_layer_2, output_mask_2 = _build_positioned_sticker(sticker_2, mask_2, position_json_2, base_rgba.size)
-    sticker_layer_3, output_mask_3 = _build_positioned_sticker(sticker_3, mask_3, position_json_3, base_rgba.size)
+    sticker_layer_1, output_mask_1 = _build_positioned_sticker(sticker_1, mask_1, position_json_1, base_rgba.size, transform_mode=transform_mode)
+    sticker_layer_2, output_mask_2 = _build_positioned_sticker(sticker_2, mask_2, position_json_2, base_rgba.size, transform_mode=transform_mode)
+    sticker_layer_3, output_mask_3 = _build_positioned_sticker(sticker_3, mask_3, position_json_3, base_rgba.size, transform_mode=transform_mode)
 
     composed = base_rgba.copy()
     composed.alpha_composite(sticker_layer_1)
@@ -1132,6 +1206,7 @@ class DecorStickerLayoutComposer:
                 "mask_3": ("MASK",),
                 "position_json_3": ("STRING", {"multiline": True, "default": default_position_json}),
                 "base_image": ("IMAGE",),
+                "transform_mode": (["颜色优先", "平滑优先"], {"default": "颜色优先"}),
             },
         }
 
@@ -1152,6 +1227,7 @@ class DecorStickerLayoutComposer:
         mask_3,
         position_json_3,
         base_image,
+        transform_mode="颜色优先",
     ):
         return _compose_stickers(
             sticker_1=sticker_1,
@@ -1164,6 +1240,7 @@ class DecorStickerLayoutComposer:
             mask_3=mask_3,
             position_json_3=position_json_3,
             base_image=base_image,
+            transform_mode=transform_mode,
         )
 
 
@@ -1370,6 +1447,7 @@ if HAS_OFFICIAL_PREVIEW_API:
                     io.Mask.Input("mask_3"),
                     io.String.Input("position_json_3", multiline=True, default=default_position_json),
                     io.Image.Input("base_image"),
+                    io.Combo.Input(["颜色优先", "平滑优先"], "transform_mode", default="颜色优先"),
                 ],
                 outputs=[
                     io.Image.Output(display_name="image"),
@@ -1392,6 +1470,7 @@ if HAS_OFFICIAL_PREVIEW_API:
             mask_3,
             position_json_3,
             base_image,
+            transform_mode="颜色优先",
         ):
             return io.NodeOutput(
                 *_compose_stickers(
@@ -1405,6 +1484,7 @@ if HAS_OFFICIAL_PREVIEW_API:
                     mask_3=mask_3,
                     position_json_3=position_json_3,
                     base_image=base_image,
+                    transform_mode=transform_mode,
                 )
             )
 
