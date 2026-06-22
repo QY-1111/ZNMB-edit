@@ -112,12 +112,13 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 
 - 位置：`x` / `y` / `left` / `top`
 - 中心点：`center_x` / `center_y` / `cx` / `cy`
+- 锚点定位：`target_x` / `target_y` / `anchor_type` / `anchor_x` / `anchor_y`
 - 尺寸：`width` / `height` / `w` / `h`
 - 边界框：`bbox` / `box` / `rect`
 - 缩放：`scale` / `scale_x` / `scale_y`
 - 参考画布尺寸：`canvas_width` / `canvas_height` / `source_width` / `source_height`
 
-最简单的示例：
+最简单的旧格式示例：
 
 ```json
 {
@@ -145,6 +146,33 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 }
 ```
 
+如果你需要更稳定的“语义挂点”定位，推荐使用锚点格式：
+
+```json
+{
+  "id": "1",
+  "size": {
+    "width": 912,
+    "height": 1145
+  },
+  "placement": {
+    "target_x": 640,
+    "target_y": 560,
+    "anchor_type": "tip",
+    "width": 260,
+    "height": 180
+  }
+}
+```
+
+锚点格式含义：
+
+- `target_x` / `target_y`：贴纸要挂到原图上的目标点
+- `anchor_type`：贴纸内部哪个语义点对齐到目标点
+- 常用 `anchor_type`：`center`、`top`、`bottom`、`left`、`right`、`top_left`、`top_right`、`bottom_left`、`bottom_right`、`tip`
+- `tip` 适合箭头、波浪箭头这类“尖端要指向目标”的贴纸
+- 如果你需要更细控制，也支持 `anchor_x` / `anchor_y`，可用百分比或 0~1 小数指定贴纸内部锚点
+
 ### 推荐给 VLM 的固定格式
 
 虽然节点兼容多种别名写法，但如果你要让 `VLM` 稳定输出、并直接喂给这个节点，建议固定成下面这个单贴纸格式，不要混用别名：
@@ -157,10 +185,11 @@ Decor Frame Sequence Preview (节点卡片直接播放)
     "height": 1145
   },
   "placement": {
-    "left": 56,
-    "top": 72,
+    "target_x": 640,
+    "target_y": 560,
+    "anchor_type": "tip",
     "width": 240,
-    "height": 240
+    "height": 180
   }
 }
 ```
@@ -169,7 +198,8 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 
 - 只保留一套字段名，避免 `x/y`、`bbox`、`center_x` 混用
 - `canvas.width` 和 `canvas.height` 明确说明这是 VLM 参考原图尺寸
-- `placement.left/top/width/height` 语义清晰，节点可以直接解析
+- `placement.target_x/target_y/anchor_type/width/height` 更适合表达“贴纸挂在哪”
+- 对箭头、波浪线、分散型装饰这类语义贴纸，锚点定位比单纯 `left/top` 更稳定
 - 所有值都用像素和数值，避免百分比、中文单位和模糊描述
 
 ### VLM 输出约束
@@ -180,7 +210,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 - 顶层必须是对象，不要输出数组
 - 必须包含 `id`、`size`、`placement`
 - `size.width`、`size.height` 必须等于 VLM 观察时原图尺寸
-- `placement.left`、`top`、`width`、`height` 必须是像素数值
+- 必须包含 `placement.target_x`、`target_y`、`anchor_type`、`width`、`height`
 - 不要输出解释文字、置信度、推理过程、建议语句
 - 不要输出百分比字符串、`px` 字符串、自然语言位置描述
 
@@ -198,28 +228,31 @@ Decor Frame Sequence Preview (节点卡片直接播放)
     {
       "id": "1",
       "placement": {
-        "left": 56,
-        "top": 72,
+        "target_x": 640,
+        "target_y": 560,
+        "anchor_type": "tip",
         "width": 240,
-        "height": 240
+        "height": 180
       }
     },
     {
       "id": "2",
       "placement": {
-        "left": 626,
-        "top": 118,
-        "width": 220,
+        "target_x": 456,
+        "target_y": 180,
+        "anchor_type": "center",
+        "width": 760,
         "height": 220
       }
     },
     {
       "id": "3",
       "placement": {
-        "left": 286,
-        "top": 1290,
-        "width": 340,
-        "height": 220
+        "target_x": 780,
+        "target_y": 260,
+        "anchor_type": "center",
+        "width": 240,
+        "height": 240
       }
     }
   ]

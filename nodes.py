@@ -268,6 +268,97 @@ def _extract_reference_canvas_size(config: Dict[str, Any], layout: Dict[str, Any
     return None, None
 
 
+def _coerce_anchor_value(value: Any, reference: float) -> float | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.endswith("%"):
+            try:
+                return reference * float(stripped[:-1].strip()) / 100.0
+            except ValueError:
+                return None
+    numeric = _coerce_float(value)
+    if numeric is None:
+        return None
+    if 0.0 <= numeric <= 1.0:
+        return reference * numeric
+    return numeric
+
+
+def _resolve_anchor_ratio(anchor_type: Any) -> Tuple[float, float] | None:
+    if not isinstance(anchor_type, str):
+        return None
+    normalized = anchor_type.strip().lower().replace("-", "_").replace(" ", "_")
+    mapping = {
+        "center": (0.5, 0.5),
+        "middle": (0.5, 0.5),
+        "top_left": (0.0, 0.0),
+        "left_top": (0.0, 0.0),
+        "top": (0.5, 0.0),
+        "top_center": (0.5, 0.0),
+        "top_right": (1.0, 0.0),
+        "right_top": (1.0, 0.0),
+        "right": (1.0, 0.5),
+        "right_center": (1.0, 0.5),
+        "bottom_right": (1.0, 1.0),
+        "right_bottom": (1.0, 1.0),
+        "bottom": (0.5, 1.0),
+        "bottom_center": (0.5, 1.0),
+        "bottom_left": (0.0, 1.0),
+        "left_bottom": (0.0, 1.0),
+        "left": (0.0, 0.5),
+        "left_center": (0.0, 0.5),
+        # 常见语义贴纸锚点：箭头尖端通常接近右下角。
+        "tip": (0.92, 0.88),
+        "arrow_tip": (0.92, 0.88),
+        "arrow_head": (0.92, 0.88),
+        "head": (0.92, 0.88),
+        "tail": (0.08, 0.12),
+        "arrow_tail": (0.08, 0.12),
+        "start": (0.08, 0.12),
+        "end": (0.92, 0.88),
+    }
+    return mapping.get(normalized)
+
+
+def _resolve_anchor_point(
+    config: Dict[str, Any],
+    layout: Dict[str, Any],
+    target_width: float,
+    target_height: float,
+) -> Tuple[float, float]:
+    anchor_block = _first_dict(config, ("anchor", "anchor_point", "pin", "attach"))
+    if anchor_block is None:
+        anchor_block = _first_dict(layout, ("anchor", "anchor_point", "pin", "attach"))
+
+    anchor_type = None
+    if isinstance(anchor_block, dict):
+        anchor_type = _get_dict_value(anchor_block, ("type", "anchor_type", "kind", "name"))
+    if anchor_type is None:
+        anchor_type = _get_dict_value(layout, ("anchor_type", "anchor", "pin_type"))
+    ratio = _resolve_anchor_ratio(anchor_type) or (0.5, 0.5)
+
+    anchor_x = anchor_y = None
+    if isinstance(anchor_block, dict):
+        anchor_x = _coerce_anchor_value(
+            _get_dict_value(anchor_block, ("x", "anchor_x", "px", "left")),
+            target_width,
+        )
+        anchor_y = _coerce_anchor_value(
+            _get_dict_value(anchor_block, ("y", "anchor_y", "py", "top")),
+            target_height,
+        )
+    if anchor_x is None:
+        anchor_x = _coerce_anchor_value(_get_dict_value(layout, ("anchor_x", "pin_x")), target_width)
+    if anchor_y is None:
+        anchor_y = _coerce_anchor_value(_get_dict_value(layout, ("anchor_y", "pin_y")), target_height)
+
+    if anchor_x is None:
+        anchor_x = target_width * ratio[0]
+    if anchor_y is None:
+        anchor_y = target_height * ratio[1]
+    return anchor_x, anchor_y
+
+
 def _resolve_layout_rect(
     config: Dict[str, Any],
     base_size: Sequence[int],
@@ -285,6 +376,7 @@ def _resolve_layout_rect(
     scale_to_base_y = base_height / max(ref_height, 1.0)
 
     left = top = width = height = center_x = center_y = None
+    target_x = target_y = None
 
     bbox = _get_dict_value(layout, ("bbox_xywh", "box_xywh", "rect_xywh"))
     if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
@@ -338,6 +430,23 @@ def _resolve_layout_rect(
     if height is None:
         height = _coerce_axis_value(_get_dict_value(layout, ("height", "h")), ref_height)
 
+    target_block = _first_dict(config, ("target", "target_point", "attach_to", "pin_to"))
+    if target_block is None:
+        target_block = _first_dict(layout, ("target", "target_point", "attach_to", "pin_to"))
+    if isinstance(target_block, dict):
+        target_x = _coerce_axis_value(
+            _get_dict_value(target_block, ("x", "target_x", "cx", "center_x")),
+            ref_width,
+        )
+        target_y = _coerce_axis_value(
+            _get_dict_value(target_block, ("y", "target_y", "cy", "center_y")),
+            ref_height,
+        )
+    if target_x is None:
+        target_x = _coerce_axis_value(_get_dict_value(layout, ("target_x", "attach_x")), ref_width)
+    if target_y is None:
+        target_y = _coerce_axis_value(_get_dict_value(layout, ("target_y", "attach_y")), ref_height)
+
     center_x = _coerce_axis_value(_get_dict_value(layout, ("center_x", "cx")), ref_width)
     center_y = _coerce_axis_value(_get_dict_value(layout, ("center_y", "cy")), ref_height)
     right = _coerce_axis_value(_get_dict_value(layout, ("right", "x2")), ref_width)
@@ -380,11 +489,19 @@ def _resolve_layout_rect(
         right *= scale_to_base_x
     if bottom is not None:
         bottom *= scale_to_base_y
+    if target_x is not None:
+        target_x *= scale_to_base_x
+    if target_y is not None:
+        target_y *= scale_to_base_y
 
     if left is None and right is not None:
         left = right - width
     if top is None and bottom is not None:
         top = bottom - height
+    if target_x is not None and target_y is not None:
+        anchor_x, anchor_y = _resolve_anchor_point(config, layout, width, height)
+        center_x = target_x - anchor_x + width / 2.0
+        center_y = target_y - anchor_y + height / 2.0
     if center_x is None:
         center_x = (left + width / 2.0) if left is not None else base_width / 2.0
     if center_y is None:
@@ -1198,8 +1315,9 @@ class DecorStickerLayoutComposer:
             '    "height": 1145\n'
             '  },\n'
             '  "placement": {\n'
-            '    "left": 56,\n'
-            '    "top": 72,\n'
+            '    "target_x": 240,\n'
+            '    "target_y": 200,\n'
+            '    "anchor_type": "center",\n'
             '    "width": 240,\n'
             '    "height": 240\n'
             '  }\n'
@@ -1431,8 +1549,9 @@ if HAS_OFFICIAL_PREVIEW_API:
                 '    "height": 1145\n'
                 '  },\n'
                 '  "placement": {\n'
-                '    "left": 56,\n'
-                '    "top": 72,\n'
+                '    "target_x": 240,\n'
+                '    "target_y": 200,\n'
+                '    "anchor_type": "center",\n'
                 '    "width": 240,\n'
                 '    "height": 240\n'
                 '  }\n'
