@@ -98,12 +98,13 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 ### 输出
 
 - `image`: 三个贴纸排版叠加后的最终图像
-- `mask_1`: 贴纸 1 经缩放、旋转、排版后回投到底图坐标系的 mask
-- `mask_2`: 贴纸 2 经缩放、旋转、排版后回投到底图坐标系的 mask
-- `mask_3`: 贴纸 3 经缩放、旋转、排版后回投到底图坐标系的 mask
-- `placement.width` / `placement.height`: 对应贴纸 `mask` 有效区域的目标排版框，节点会保持贴纸原始比例并完整放入该框内，不会拉伸变形
+- `mask_1`: 贴纸 1 经缩放、排版后回投到底图坐标系的 mask
+- `mask_2`: 贴纸 2 经缩放、排版后回投到底图坐标系的 mask
+- `mask_3`: 贴纸 3 经缩放、排版后回投到底图坐标系的 mask
 - 节点会先按 `mask` 做阈值裁切，再取贴纸有效区域参与排版，避免弱水印或底噪把裁切区域错误放大
-- `transform_mode`: `颜色优先` 会尽量保持贴纸主体色值不被透明背景污染，`平滑优先` 会让缩放和旋转边缘更柔和
+- 静态排版节点只控制贴纸放在底图中的位置和缩放，不改变传入贴纸本身的旋转和透明度
+- `width` / `height` / `scale` / `scale_x` / `scale_y` 可用于缩放贴纸，节点会保持原始比例，不拉伸变形
+- JSON 中即使传入 `rotation`、`opacity` 也会被忽略
 
 ### 位置 JSON
 
@@ -113,8 +114,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 - 中心点：`center_x` / `center_y` / `cx` / `cy`
 - 尺寸：`width` / `height` / `w` / `h`
 - 边界框：`bbox` / `box` / `rect`
-- 旋转：`rotation` / `angle`
-- 透明度：`opacity` / `alpha`
+- 缩放：`scale` / `scale_x` / `scale_y`
 - 参考画布尺寸：`canvas_width` / `canvas_height` / `source_width` / `source_height`
 
 最简单的示例：
@@ -126,9 +126,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
   "x": 120,
   "y": 240,
   "width": 320,
-  "height": 320,
-  "rotation": -8,
-  "opacity": 1.0
+  "height": 320
 }
 ```
 
@@ -143,8 +141,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
     "top": 240,
     "width": 320,
     "height": 320
-  },
-  "rotation": 12
+  }
 }
 ```
 
@@ -163,9 +160,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
     "left": 56,
     "top": 72,
     "width": 240,
-    "height": 240,
-    "rotation": -8,
-    "opacity": 1.0
+    "height": 240
   }
 }
 ```
@@ -186,8 +181,6 @@ Decor Frame Sequence Preview (节点卡片直接播放)
 - 必须包含 `id`、`size`、`placement`
 - `size.width`、`size.height` 必须等于 VLM 观察时原图尺寸
 - `placement.left`、`top`、`width`、`height` 必须是像素数值
-- `rotation` 单位固定为角度，顺时针为正值
-- `opacity` 固定为 `0.0` 到 `1.0`
 - 不要输出解释文字、置信度、推理过程、建议语句
 - 不要输出百分比字符串、`px` 字符串、自然语言位置描述
 
@@ -208,9 +201,7 @@ Decor Frame Sequence Preview (节点卡片直接播放)
         "left": 56,
         "top": 72,
         "width": 240,
-        "height": 240,
-        "rotation": -8,
-        "opacity": 1.0
+        "height": 240
       }
     },
     {
@@ -219,20 +210,16 @@ Decor Frame Sequence Preview (节点卡片直接播放)
         "left": 626,
         "top": 118,
         "width": 220,
-        "height": 220,
-        "rotation": 10,
-        "opacity": 1.0
+        "height": 220
       }
     },
     {
       "id": "3",
       "placement": {
         "left": 286,
-        "top": 720,
+        "top": 1290,
         "width": 340,
-        "height": 220,
-        "rotation": -6,
-        "opacity": 1.0
+        "height": 220
       }
     }
   ]

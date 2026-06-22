@@ -343,19 +343,30 @@ def _resolve_layout_rect(
     right = _coerce_axis_value(_get_dict_value(layout, ("right", "x2")), ref_width)
     bottom = _coerce_axis_value(_get_dict_value(layout, ("bottom", "y2")), ref_height)
 
-    if width is None or height is None:
+    if width is None and height is None:
         scale = _coerce_float(_get_dict_value(layout, ("scale",)))
         scale_x = _coerce_float(_get_dict_value(layout, ("scale_x", "sx")))
         scale_y = _coerce_float(_get_dict_value(layout, ("scale_y", "sy")))
         scale_x = scale_x if scale_x is not None else (scale if scale is not None else 1.0)
         scale_y = scale_y if scale_y is not None else (scale if scale is not None else 1.0)
-        if width is None:
-            width = element_width * max(scale_x, 0.01)
-        if height is None:
-            height = element_height * max(scale_y, 0.01)
+        width = element_width * max(scale_x, 0.01)
+        height = element_height * max(scale_y, 0.01)
+    elif width is None:
+        height = max(float(height), 1.0)
+        scale = height / max(float(element_height), 1.0)
+        width = float(element_width) * scale
+    elif height is None:
+        width = max(float(width), 1.0)
+        scale = width / max(float(element_width), 1.0)
+        height = float(element_height) * scale
 
-    width = max((width or element_width) * scale_to_base_x, 1.0)
-    height = max((height or element_height) * scale_to_base_y, 1.0)
+    width = max(float(width) * scale_to_base_x, 1.0)
+    height = max(float(height) * scale_to_base_y, 1.0)
+
+    # 同时给出 width 和 height 时，按目标框等比缩放，不拉伸贴纸。
+    fit_scale = min(width / max(float(element_width), 1.0), height / max(float(element_height), 1.0))
+    width = max(float(element_width) * fit_scale, 1.0)
+    height = max(float(element_height) * fit_scale, 1.0)
 
     if left is not None:
         left *= scale_to_base_x
@@ -379,17 +390,14 @@ def _resolve_layout_rect(
     if center_y is None:
         center_y = (top + height / 2.0) if top is not None else base_height / 2.0
 
-    rotation = _coerce_float(_get_dict_value(layout, ("rotation", "angle"))) or 0.0
-    opacity = _coerce_float(_get_dict_value(layout, ("opacity", "alpha")))
-    opacity = 1.0 if opacity is None else max(0.0, min(1.0, opacity))
-
     return {
         "center_x": center_x,
         "center_y": center_y,
         "target_width": width,
         "target_height": height,
-        "rotation": rotation,
-        "opacity": opacity,
+        # 静态排版节点只负责把贴纸放到合适位置，不接收旋转和透明度控制。
+        "rotation": 0.0,
+        "opacity": 1.0,
     }
 
 
@@ -478,26 +486,18 @@ def _apply_layout_to_element(
 ) -> Tuple[Image.Image, Image.Image]:
     config = _normalize_position_config(position_json)
     rect = _resolve_layout_rect(config, base_image.size, element.size)
-    transform_mode = str(transform_mode or "颜色优先").strip()
-    if transform_mode == "平滑优先":
-        transformed = _resize_rgba_smooth(
-            element,
-            rect["target_width"],
-            rect["target_height"],
-        )
-        transformed = _rotate_rgba_smooth(transformed, rect["rotation"])
-    else:
+    _ = transform_mode
+    if (
+        int(round(rect["target_width"])) != element.width
+        or int(round(rect["target_height"])) != element.height
+    ):
         transformed = _resize_rgba_preserve_color(
             element,
             rect["target_width"],
             rect["target_height"],
         )
-        transformed = _rotate_rgba_preserve_color(transformed, rect["rotation"])
-
-    if rect["opacity"] < 1.0:
-        alpha = transformed.getchannel("A")
-        alpha = alpha.point(lambda px: int(round(px * rect["opacity"])))
-        transformed.putalpha(alpha)
+    else:
+        transformed = element.copy()
 
     paste_x = int(round(rect["center_x"] - transformed.width / 2.0))
     paste_y = int(round(rect["center_y"] - transformed.height / 2.0))
@@ -1188,9 +1188,7 @@ class DecorStickerLayoutComposer:
             '    "left": 56,\n'
             '    "top": 72,\n'
             '    "width": 240,\n'
-            '    "height": 240,\n'
-            '    "rotation": -8,\n'
-            '    "opacity": 1.0\n'
+            '    "height": 240\n'
             '  }\n'
             '}'
         )
@@ -1206,7 +1204,6 @@ class DecorStickerLayoutComposer:
                 "mask_3": ("MASK",),
                 "position_json_3": ("STRING", {"multiline": True, "default": default_position_json}),
                 "base_image": ("IMAGE",),
-                "transform_mode": (["颜色优先", "平滑优先"], {"default": "颜色优先"}),
             },
         }
 
@@ -1227,7 +1224,6 @@ class DecorStickerLayoutComposer:
         mask_3,
         position_json_3,
         base_image,
-        transform_mode="颜色优先",
     ):
         return _compose_stickers(
             sticker_1=sticker_1,
@@ -1240,7 +1236,6 @@ class DecorStickerLayoutComposer:
             mask_3=mask_3,
             position_json_3=position_json_3,
             base_image=base_image,
-            transform_mode=transform_mode,
         )
 
 
@@ -1426,9 +1421,7 @@ if HAS_OFFICIAL_PREVIEW_API:
                 '    "left": 56,\n'
                 '    "top": 72,\n'
                 '    "width": 240,\n'
-                '    "height": 240,\n'
-                '    "rotation": -8,\n'
-                '    "opacity": 1.0\n'
+                '    "height": 240\n'
                 '  }\n'
                 '}'
             )
@@ -1447,7 +1440,6 @@ if HAS_OFFICIAL_PREVIEW_API:
                     io.Mask.Input("mask_3"),
                     io.String.Input("position_json_3", multiline=True, default=default_position_json),
                     io.Image.Input("base_image"),
-                    io.Combo.Input(["颜色优先", "平滑优先"], "transform_mode", default="颜色优先"),
                 ],
                 outputs=[
                     io.Image.Output(display_name="image"),
@@ -1470,7 +1462,6 @@ if HAS_OFFICIAL_PREVIEW_API:
             mask_3,
             position_json_3,
             base_image,
-            transform_mode="颜色优先",
         ):
             return io.NodeOutput(
                 *_compose_stickers(
@@ -1484,7 +1475,6 @@ if HAS_OFFICIAL_PREVIEW_API:
                     mask_3=mask_3,
                     position_json_3=position_json_3,
                     base_image=base_image,
-                    transform_mode=transform_mode,
                 )
             )
 
