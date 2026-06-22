@@ -1160,6 +1160,26 @@ class DecorStickerLayoutComposer:
         )
 
 
+class DecorImageSizeText:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "get_text"
+    CATEGORY = "Ai说说/工具"
+
+    def get_text(self, image):
+        pil = _tensor_image_to_pil(image)
+        text = f"宽度：{pil.width}\n高度：{pil.height}"
+        return (text,)
+
+
 class DecorFrameSequencePreview:
     """把上游输出的 IMAGE 帧序列直接在前端播放成动画。
 
@@ -1382,6 +1402,25 @@ if HAS_OFFICIAL_PREVIEW_API:
             )
 
 
+    class DecorImageSizeTextLatest(io.ComfyNode):
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="DecorImageSizeText",
+                display_name="Decor Image Size Text",
+                category="Ai说说/工具",
+                inputs=[
+                    io.Image.Input("image"),
+                ],
+                outputs=[io.String.Output(display_name="text")],
+            )
+
+        @classmethod
+        def execute(cls, image):
+            pil = _tensor_image_to_pil(image)
+            return io.NodeOutput(f"宽度：{pil.width}\n高度：{pil.height}")
+
+
     class DecorFrameSequencePreviewLatest(io.ComfyNode):
         @classmethod
         def define_schema(cls):
@@ -1426,6 +1465,7 @@ if HAS_OFFICIAL_PREVIEW_API:
             return [
                 DecorAnimationPlayerLatest,
                 DecorStickerLayoutComposerLatest,
+                DecorImageSizeTextLatest,
                 DecorFrameSequencePreviewLatest,
             ]
 
@@ -1437,11 +1477,13 @@ if HAS_OFFICIAL_PREVIEW_API:
 NODE_CLASS_MAPPINGS = {
     "DecorAnimationPlayer": DecorAnimationPlayer,
     "DecorStickerLayoutComposer": DecorStickerLayoutComposer,
+    "DecorImageSizeText": DecorImageSizeText,
     "DecorFrameSequencePreview": DecorFrameSequencePreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DecorAnimationPlayer": "Decor Animation Player",
     "DecorStickerLayoutComposer": "Decor Sticker Layout Composer",
+    "DecorImageSizeText": "Decor Image Size Text",
     "DecorFrameSequencePreview": "Decor Frame Sequence Preview",
 }
